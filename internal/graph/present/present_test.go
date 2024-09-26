@@ -16,22 +16,28 @@ package present
 
 import (
 	"context"
+	"errors"
+	"syscall"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/pkg/errors"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
-
-	"github.com/crossplane/crossplane-runtime/pkg/test"
+	meta "k8s.io/apimachinery/pkg/api/meta"
 )
 
 func TestError(t *testing.T) {
 	errTimeout := kerrors.NewTimeoutError("too slow", 0)
+	errNetwork := syscall.ECONNREFUSED
+	errNoKindMatch := &meta.NoKindMatchError{}
 	errBoom := errors.New("boom")
 
 	gerrTimeout := gqlerror.WrapPath(nil, errTimeout)
+	gerrNetwork := gqlerror.WrapPath(nil, errNetwork)
+	gerrNoKindMatch := gqlerror.WrapPath(nil, errNoKindMatch)
 	gerrBoom := gqlerror.WrapPath(nil, errBoom)
+	gqlInput := "input: "
 
 	type args struct {
 		ctx context.Context
@@ -51,6 +57,41 @@ func TestError(t *testing.T) {
 			},
 			want: &gqlerror.Error{
 				Message: errRBAC + ": " + gerrTimeout.Message,
+				Extensions: map[string]interface{}{
+					Code:   errTimeout.Status().Code,
+					Source: ErrorSourceAPIServer,
+					Reason: errTimeout.Status().Reason,
+				},
+			},
+		},
+		"NetworkError": {
+			reason: "Network related errors should be 'upgraded' to a GQL error. ",
+			args: args{
+				ctx: context.Background(),
+				err: gerrNetwork,
+			},
+			want: &gqlerror.Error{
+				Message: gqlInput + gerrNetwork.Message,
+				Extensions: map[string]interface{}{
+					Code:   ErrorRetryable,
+					Source: ErrorSourceNetwork,
+					Type:   "",
+				},
+			},
+		},
+		"NotFoundError": {
+			reason: "Error types classified as 'Not Found' should be 'upgraded' to a GQL error. ",
+			args: args{
+				ctx: context.Background(),
+				err: gerrNoKindMatch,
+			},
+			want: &gqlerror.Error{
+				Message: gqlInput + gerrNoKindMatch.Message,
+				Extensions: map[string]interface{}{
+					Code:   ErrorNotFound,
+					Source: ErrorSourceAPI,
+					Type:   "NoMatchKind",
+				},
 			},
 		},
 		"OtherGQLError": {
@@ -59,7 +100,12 @@ func TestError(t *testing.T) {
 				ctx: context.Background(),
 				err: gerrBoom,
 			},
-			want: gerrBoom,
+			want: &gqlerror.Error{
+				Message: gerrBoom.Message,
+				Extensions: map[string]interface{}{
+					Source: ErrorSourceUnknown,
+				},
+			},
 		},
 		"OtherTimeoutError": {
 			reason: "Non-GQL timeout errors should be both decorated and 'upgraded' to a GQL error.",
@@ -69,6 +115,11 @@ func TestError(t *testing.T) {
 			},
 			want: &gqlerror.Error{
 				Message: errRBAC + ": " + gerrTimeout.Message,
+				Extensions: map[string]interface{}{
+					Code:   errTimeout.Status().Code,
+					Source: ErrorSourceAPIServer,
+					Reason: errTimeout.Status().Reason,
+				},
 			},
 		},
 		"OtherError": {
@@ -77,14 +128,19 @@ func TestError(t *testing.T) {
 				ctx: context.Background(),
 				err: errBoom,
 			},
-			want: gerrBoom,
+			want: &gqlerror.Error{
+				Message: errBoom.Error(),
+				Extensions: map[string]interface{}{
+					Source: ErrorSourceUnknown,
+				},
+			},
 		},
 	}
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := Error(tc.args.ctx, tc.args.err)
-			if diff := cmp.Diff(tc.want, got, test.EquateErrors()); diff != "" {
+			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreUnexported(gqlerror.Error{})); diff != "" {
 				t.Errorf("%s\nError(...): -want, +got\n%s", tc.reason, diff)
 			}
 		})

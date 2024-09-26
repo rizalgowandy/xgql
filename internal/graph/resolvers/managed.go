@@ -16,16 +16,20 @@ package resolvers
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/99designs/gqlgen/graphql"
-	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
-	kextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
+
 	"github.com/upbound/xgql/internal/auth"
 	"github.com/upbound/xgql/internal/graph/model"
+	"github.com/upbound/xgql/internal/unstructured"
 )
 
 const (
@@ -36,7 +40,7 @@ type managedResource struct {
 	clients ClientCache
 }
 
-func (r *managedResource) Events(ctx context.Context, obj *model.ManagedResource) (*model.EventConnection, error) {
+func (r *managedResource) Events(ctx context.Context, obj *model.ManagedResource) (model.EventConnection, error) {
 	e := &events{clients: r.clients}
 	return e.Resolve(ctx, &corev1.ObjectReference{
 		APIVersion: obj.APIVersion,
@@ -46,7 +50,10 @@ func (r *managedResource) Events(ctx context.Context, obj *model.ManagedResource
 	})
 }
 
-func (r *managedResource) Definition(ctx context.Context, obj *model.ManagedResource) (model.ManagedResourceDefinition, error) {
+func (r *managedResource) Definition(ctx context.Context, obj *model.ManagedResource) (model.ManagedResourceDefinition, error) { //nolint:gocyclo
+	// NOTE(tnthornton) this function is not really all that complex at the
+	// moment, however we should be wary of future addtions as we are already
+	// running into cyclomatic complexity errors.
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -54,12 +61,6 @@ func (r *managedResource) Definition(ctx context.Context, obj *model.ManagedReso
 	c, err := r.clients.Get(creds)
 	if err != nil {
 		graphql.AddError(ctx, errors.Wrap(err, errGetClient))
-		return nil, nil
-	}
-
-	in := &kextv1.CustomResourceDefinitionList{}
-	if err := c.List(ctx, in); err != nil {
-		graphql.AddError(ctx, errors.Wrap(err, errListCRDs))
 		return nil, nil
 	}
 
@@ -71,18 +72,46 @@ func (r *managedResource) Definition(ctx context.Context, obj *model.ManagedReso
 		return nil, nil
 	}
 
-	for i := range in.Items {
-		crd := in.Items[i] // So we don't take the address of a range variable.
+	name := pluralForm(strings.ToLower(obj.Kind))
 
-		if crd.Spec.Group != gv.Group {
-			continue
+	nn := types.NamespacedName{Name: fmt.Sprintf("%s.%s", name, gv.Group)}
+	in := unstructured.NewCRD()
+	err = c.Get(ctx, nn, in.GetUnstructured())
+
+	if err != nil && !kerrors.IsNotFound(err) {
+		graphql.AddError(ctx, errors.Wrap(err, errGetCRD))
+		return nil, nil
+	}
+
+	// We didn't find the CRD we were looking for, list all CRDs and see if we
+	// can find the matching one.
+	if kerrors.IsNotFound(err) {
+		lin := unstructured.NewCRDList()
+		if err := c.List(ctx, lin.GetUnstructuredList()); err != nil {
+			graphql.AddError(ctx, errors.Wrap(err, errListCRDs))
+			return nil, nil
 		}
 
-		if crd.Spec.Names.Kind != obj.Kind {
-			continue
-		}
+		for i := range lin.Items {
+			crd := unstructured.CustomResourceDefinition{Unstructured: lin.Items[i]} // So we don't take the address of a range variable.
 
-		out := model.GetCustomResourceDefinition(&crd)
+			if crd.GetSpecGroup() != gv.Group {
+				continue
+			}
+
+			if crd.GetSpecNames().Kind != obj.Kind {
+				continue
+			}
+
+			out := model.GetCustomResourceDefinition(&crd)
+			return &out, nil
+		}
+	}
+
+	// We found a CRD, let's double check the Group and Kind match our
+	// expectations.
+	if in.GetSpecGroup() == gv.Group && in.GetSpecNames().Kind == obj.Kind {
+		out := model.GetCustomResourceDefinition(in)
 		return &out, nil
 	}
 
@@ -94,7 +123,7 @@ type managedResourceSpec struct {
 }
 
 func (r *managedResourceSpec) ConnectionSecret(ctx context.Context, obj *model.ManagedResourceSpec) (*model.Secret, error) {
-	if obj.WritesConnectionSecretToReference == nil {
+	if obj.WriteConnectionSecretToReference == nil {
 		return nil, nil
 	}
 
@@ -110,8 +139,8 @@ func (r *managedResourceSpec) ConnectionSecret(ctx context.Context, obj *model.M
 
 	s := &corev1.Secret{}
 	nn := types.NamespacedName{
-		Namespace: obj.WritesConnectionSecretToReference.Namespace,
-		Name:      obj.WritesConnectionSecretToReference.Name,
+		Namespace: obj.WriteConnectionSecretToReference.Namespace,
+		Name:      obj.WriteConnectionSecretToReference.Name,
 	}
 	if err := c.Get(ctx, nn, s); err != nil {
 		graphql.AddError(ctx, errors.Wrap(err, errGetSecret))

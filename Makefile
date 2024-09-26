@@ -6,10 +6,14 @@ PLATFORMS ?= linux_amd64 linux_arm64
 -include build/makelib/common.mk
 
 # Setup Output
+S3_BUCKET ?= public-upbound.releases/$(PROJECT_NAME)
 -include build/makelib/output.mk
 
 # Setup Go
 NPROCS ?= 1
+GO_REQUIRED_VERSION = 1.23.1
+GOLANGCILINT_VERSION = 1.61.0
+GO_LINT_ARGS ?= "--fix"
 GO_TEST_PARALLEL := $(shell echo $$(( $(NPROCS) / 2 )))
 GO_STATIC_PACKAGES = $(GO_PROJECT)/cmd/${PROJECT_NAME}
 GO_LDFLAGS += -X $(GO_PROJECT)/internal/version.Version=$(VERSION)
@@ -18,13 +22,13 @@ GO111MODULE = on
 -include build/makelib/golang.mk
 
 # Setup Node (for linting the schema)
-YARN_DIR = lint-schema
 -include build/makelib/yarnjs.mk
 
 # Setup Helm
+KIND_VERSION = v0.16.0
 USE_HELM3 = true
-HELM_BASE_URL = https://charts.upbound.io 
-HELM_S3_BUCKET = upbound.charts
+HELM_BASE_URL = https://charts.upbound.io
+HELM_S3_BUCKET = public-upbound.charts
 HELM_CHARTS = xgql
 HELM_CHART_LINT_ARGS_xgql = --set nameOverride='',imagePullSecrets=''
 -include build/makelib/k8s_tools.mk

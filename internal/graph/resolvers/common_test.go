@@ -21,13 +21,14 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/pkg/errors"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/pkg/fieldpath"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
 
 	"github.com/upbound/xgql/internal/auth"
@@ -41,6 +42,9 @@ var (
 	_ generated.SecretResolver                   = &secret{}
 	_ generated.ConfigMapResolver                = &configMap{}
 	_ generated.CustomResourceDefinitionResolver = &crd{}
+
+	crdAPIVersion = "apiextensions.k8s.io/v1"
+	crdKind       = "CustomResourceDefinition"
 )
 
 func TestCRDDefinedResources(t *testing.T) {
@@ -63,7 +67,7 @@ func TestCRDDefinedResources(t *testing.T) {
 		version *string
 	}
 	type want struct {
-		krc  *model.KubernetesResourceConnection
+		krc  model.KubernetesResourceConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -84,7 +88,7 @@ func TestCRDDefinedResources(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -98,15 +102,15 @@ func TestCRDDefinedResources(t *testing.T) {
 			args: args{
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 				obj: &model.CustomResourceDefinition{
-					Spec: &model.CustomResourceDefinitionSpec{
+					Spec: model.CustomResourceDefinitionSpec{
 						Group: group,
-						Names: &model.CustomResourceDefinitionNames{Kind: kind},
+						Names: model.CustomResourceDefinitionNames{Kind: kind},
 					},
 				},
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListResources).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListResources)),
 				},
 			},
 		},
@@ -132,11 +136,11 @@ func TestCRDDefinedResources(t *testing.T) {
 			args: args{
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 				obj: &model.CustomResourceDefinition{
-					Spec: &model.CustomResourceDefinitionSpec{
+					Spec: model.CustomResourceDefinitionSpec{
 						Group: group,
-						Names: &model.CustomResourceDefinitionNames{
+						Names: model.CustomResourceDefinitionNames{
 							Kind:     kind,
-							ListKind: pointer.StringPtr(listKind),
+							ListKind: ptr.To(listKind),
 						},
 						Versions: []model.CustomResourceDefinitionVersion{
 							// This version should be ignored because it is
@@ -153,7 +157,7 @@ func TestCRDDefinedResources(t *testing.T) {
 				},
 			},
 			want: want{
-				krc: &model.KubernetesResourceConnection{
+				krc: model.KubernetesResourceConnection{
 					Nodes:      []model.KubernetesResource{ggr},
 					TotalCount: 1,
 				},
@@ -181,11 +185,11 @@ func TestCRDDefinedResources(t *testing.T) {
 			args: args{
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 				obj: &model.CustomResourceDefinition{
-					Spec: &model.CustomResourceDefinitionSpec{
+					Spec: model.CustomResourceDefinitionSpec{
 						Group: group,
-						Names: &model.CustomResourceDefinitionNames{
+						Names: model.CustomResourceDefinitionNames{
 							Kind:     kind,
-							ListKind: pointer.StringPtr(listKind),
+							ListKind: ptr.To(listKind),
 						},
 						Versions: []model.CustomResourceDefinitionVersion{
 							// Normally we'd pick this version first, but in
@@ -202,10 +206,10 @@ func TestCRDDefinedResources(t *testing.T) {
 						},
 					},
 				},
-				version: pointer.StringPtr(version),
+				version: ptr.To(version),
 			},
 			want: want{
-				krc: &model.KubernetesResourceConnection{
+				krc: model.KubernetesResourceConnection{
 					Nodes:      []model.KubernetesResource{ggr},
 					TotalCount: 1,
 				},
@@ -228,7 +232,7 @@ func TestCRDDefinedResources(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.DefinedResources(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.krc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.krc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.DefinedResources(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})

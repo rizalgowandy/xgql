@@ -16,20 +16,20 @@ package resolvers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/pkg/errors"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	kerrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/json"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/fieldpath"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
 
@@ -89,7 +89,7 @@ func TestIsRetriable(t *testing.T) {
 func TestCreateKubernetesResource(t *testing.T) {
 	errBoom := errors.New("boom")
 	errFieldPath := fieldpath.Pave(map[string]interface{}{}).SetValue("..", nil)
-	errUnmarshal := json.Unmarshal([]byte("\""), nil)
+	errUnmarshal := json.Unmarshal([]byte("\""), nil) //nolint:govet
 
 	// Unmarshalling to an *interface{} results in a slightly different error.
 	var v interface{}
@@ -108,7 +108,7 @@ func TestCreateKubernetesResource(t *testing.T) {
 		input model.CreateKubernetesResourceInput
 	}
 	type want struct {
-		payload *model.CreateKubernetesResourcePayload
+		payload model.CreateKubernetesResourcePayload
 		err     error
 		errs    gqlerror.List
 	}
@@ -129,7 +129,7 @@ func TestCreateKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -146,7 +146,7 @@ func TestCreateKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errUnmarshal, errUnmarshalUnstructured).Error()),
+					gqlerror.Wrap(errors.Wrap(errUnmarshal, errUnmarshalUnstructured)),
 				},
 			},
 		},
@@ -166,7 +166,7 @@ func TestCreateKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrapf(errUnmarshalPatch, errFmtUnmarshalPatch, 0).Error()),
+					gqlerror.Wrap(errors.Wrapf(errUnmarshalPatch, errFmtUnmarshalPatch, 0)),
 				},
 			},
 		},
@@ -187,7 +187,7 @@ func TestCreateKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrapf(errFieldPath, errFmtPatch, 0).Error()),
+					gqlerror.Wrap(errors.Wrapf(errFieldPath, errFmtPatch, 0)),
 				},
 			},
 		},
@@ -206,7 +206,7 @@ func TestCreateKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errCreateResource).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errCreateResource)),
 				},
 			},
 		},
@@ -224,7 +224,7 @@ func TestCreateKubernetesResource(t *testing.T) {
 				},
 			},
 			want: want{
-				payload: &model.CreateKubernetesResourcePayload{
+				payload: model.CreateKubernetesResourcePayload{
 					Resource: kr,
 				},
 			},
@@ -246,7 +246,7 @@ func TestCreateKubernetesResource(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ns.CreateKubernetesResource(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.payload, got, cmpopts.IgnoreFields(model.GenericResource{}, "Unstructured"), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.payload, got, cmpopts.IgnoreFields(model.GenericResource{}, "PavedAccess"), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\ns.CreateKubernetesResource(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -256,7 +256,7 @@ func TestCreateKubernetesResource(t *testing.T) {
 func TestUpdateKubernetesResource(t *testing.T) {
 	errBoom := errors.New("boom")
 	errFieldPath := fieldpath.Pave(map[string]interface{}{}).SetValue("..", nil)
-	errUnmarshal := json.Unmarshal([]byte("\""), nil)
+	errUnmarshal := json.Unmarshal([]byte("\""), nil) //nolint:govet
 
 	// Unmarshalling to an *interface{} results in a slightly different error.
 	var v interface{}
@@ -276,7 +276,7 @@ func TestUpdateKubernetesResource(t *testing.T) {
 		input model.UpdateKubernetesResourceInput
 	}
 	type want struct {
-		payload *model.UpdateKubernetesResourcePayload
+		payload model.UpdateKubernetesResourcePayload
 		err     error
 		errs    gqlerror.List
 	}
@@ -297,7 +297,7 @@ func TestUpdateKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -314,7 +314,7 @@ func TestUpdateKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errUnmarshal, errUnmarshalUnstructured).Error()),
+					gqlerror.Wrap(errors.Wrap(errUnmarshal, errUnmarshalUnstructured)),
 				},
 			},
 		},
@@ -334,7 +334,7 @@ func TestUpdateKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrapf(errUnmarshalPatch, errFmtUnmarshalPatch, 0).Error()),
+					gqlerror.Wrap(errors.Wrapf(errUnmarshalPatch, errFmtUnmarshalPatch, 0)),
 				},
 			},
 		},
@@ -355,7 +355,7 @@ func TestUpdateKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrapf(errFieldPath, errFmtPatch, 0).Error()),
+					gqlerror.Wrap(errors.Wrapf(errFieldPath, errFmtPatch, 0)),
 				},
 			},
 		},
@@ -374,7 +374,7 @@ func TestUpdateKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errUpdateResource).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errUpdateResource)),
 				},
 			},
 		},
@@ -398,7 +398,7 @@ func TestUpdateKubernetesResource(t *testing.T) {
 				},
 			},
 			want: want{
-				payload: &model.UpdateKubernetesResourcePayload{
+				payload: model.UpdateKubernetesResourcePayload{
 					Resource: kr,
 				},
 			},
@@ -420,7 +420,7 @@ func TestUpdateKubernetesResource(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ns.UpdateKubernetesResource(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.payload, got, cmpopts.IgnoreFields(model.GenericResource{}, "Unstructured"), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.payload, got, cmpopts.IgnoreFields(model.GenericResource{}, "PavedAccess"), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\ns.UpdateKubernetesResource(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -435,7 +435,7 @@ func TestDeleteKubernetesResource(t *testing.T) {
 		id  model.ReferenceID
 	}
 	type want struct {
-		payload *model.DeleteKubernetesResourcePayload
+		payload model.DeleteKubernetesResourcePayload
 		err     error
 		errs    gqlerror.List
 	}
@@ -462,7 +462,7 @@ func TestDeleteKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -479,7 +479,7 @@ func TestDeleteKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errDeleteResource).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errDeleteResource)),
 				},
 			},
 		},
@@ -500,7 +500,7 @@ func TestDeleteKubernetesResource(t *testing.T) {
 				},
 			},
 			want: want{
-				payload: &model.DeleteKubernetesResourcePayload{
+				payload: model.DeleteKubernetesResourcePayload{
 					Resource: kr,
 				},
 			},
@@ -522,7 +522,7 @@ func TestDeleteKubernetesResource(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ns.DeleteKubernetesResource(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.payload, got, cmpopts.IgnoreFields(model.GenericResource{}, "Unstructured"), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.payload, got, cmpopts.IgnoreFields(model.GenericResource{}, "PavedAccess"), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\ns.DeleteKubernetesResource(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})

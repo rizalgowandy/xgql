@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/99designs/gqlgen/graphql/handler/transport"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/rest"
 )
 
@@ -75,21 +77,19 @@ func (c Credentials) Inject(cfg *rest.Config) *rest.Config {
 
 // Hash returns a SHA-256 hash of the supplied credentials, plus any extra bytes
 // that were supplied.
+//
 //nolint:errcheck // Writing to a hash never returns an error.
 func (c Credentials) Hash(extra []byte) string {
+	// Groups are unordered which will result in different hashes for the same
+	// set of groups.
+	gset := sets.New[string]()
+	gset.Insert(c.Impersonate.Groups...)
+	sortedGroups := sets.List(gset)
+
 	h := sha256.New()
-	h.Write([]byte(c.BearerToken))
-	h.Write([]byte(c.BasicUsername))
-	h.Write([]byte(c.BasicPassword))
 	h.Write([]byte(c.Impersonate.Username))
-	for _, g := range c.Impersonate.Groups {
+	for _, g := range sortedGroups {
 		h.Write([]byte(g))
-	}
-	for k, vs := range c.Impersonate.Extra {
-		h.Write([]byte(k))
-		for _, v := range vs {
-			h.Write([]byte(v))
-		}
 	}
 
 	h.Write(extra)
@@ -138,6 +138,33 @@ func Middleware(next http.Handler) http.Handler {
 			Impersonate:   ExtractImpersonation(r),
 		})))
 	})
+}
+
+func WebsocketInit(ctx context.Context, initPayload transport.InitPayload) (context.Context, error) {
+	// don't re-initialize credentials from the init payload if present in request headers.
+	if cr, ok := FromContext(ctx); ok {
+		if cr.BasicUsername != "" || cr.BasicPassword != "" || cr.BearerToken != "" ||
+			cr.Impersonate.Username != "" || len(cr.Impersonate.Groups) > 0 || len(cr.Impersonate.Extra) > 0 {
+			return ctx, nil
+		}
+	}
+	r := &http.Request{
+		Header: make(http.Header),
+	}
+	for k := range initPayload {
+		s := initPayload.GetString(k)
+		if s == "" {
+			continue
+		}
+		r.Header.Add(k, s)
+	}
+	bu, bp, _ := r.BasicAuth()
+	return context.WithValue(ctx, key, Credentials{
+		BasicUsername: bu,
+		BasicPassword: bp,
+		BearerToken:   ExtractBearerToken(r),
+		Impersonate:   ExtractImpersonation(r),
+	}), nil
 }
 
 // FromContext extracts credentials from the supplied context.

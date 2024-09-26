@@ -20,13 +20,13 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	core "k8s.io/api/core/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kunstructured "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/claim"
 
 	"github.com/upbound/xgql/internal/unstructured"
 )
@@ -50,7 +50,7 @@ func TestGetCompositeResource(t *testing.T) {
 				xr.SetName("cool")
 				xr.SetCompositionSelector(&metav1.LabelSelector{MatchLabels: map[string]string{"cool": "very"}})
 				xr.SetCompositionReference(&corev1.ObjectReference{Name: "coolcmp"})
-				xr.SetClaimReference(&corev1.ObjectReference{Name: "coolclaim"})
+				xr.SetClaimReference(&claim.Reference{Name: "coolclaim"})
 				xr.SetResourceReferences([]corev1.ObjectReference{{Name: "coolmanaged"}})
 				xr.SetWriteConnectionSecretToReference(&xpv1.SecretReference{Name: "coolsecret"})
 				xr.SetConnectionDetailsLastPublishedTime(&mp)
@@ -66,15 +66,15 @@ func TestGetCompositeResource(t *testing.T) {
 				},
 				APIVersion: "example.org/v1",
 				Kind:       "CompositeResource",
-				Metadata: &ObjectMeta{
+				Metadata: ObjectMeta{
 					Name: "cool",
 				},
-				Spec: &CompositeResourceSpec{
-					CompositionSelector:               &LabelSelector{MatchLabels: map[string]string{"cool": "very"}},
-					CompositionReference:              &corev1.ObjectReference{Name: "coolcmp"},
-					ClaimReference:                    &corev1.ObjectReference{Name: "coolclaim"},
-					ResourceReferences:                []corev1.ObjectReference{{Name: "coolmanaged"}},
-					WritesConnectionSecretToReference: &xpv1.SecretReference{Name: "coolsecret"},
+				Spec: CompositeResourceSpec{
+					CompositionSelector:              &LabelSelector{MatchLabels: map[string]string{"cool": "very"}},
+					CompositionReference:             &corev1.ObjectReference{Name: "coolcmp"},
+					ClaimReference:                   &claim.Reference{Name: "coolclaim"},
+					ResourceReferences:               []corev1.ObjectReference{{Name: "coolmanaged"}},
+					WriteConnectionSecretToReference: &xpv1.SecretReference{Name: "coolsecret"},
 				},
 				Status: &CompositeResourceStatus{
 					Conditions: []Condition{{}},
@@ -88,12 +88,12 @@ func TestGetCompositeResource(t *testing.T) {
 			reason: "Absent optional fields should be absent in our model",
 			u:      &kunstructured.Unstructured{Object: make(map[string]interface{})},
 			want: CompositeResource{
-				Metadata: &ObjectMeta{},
-				Spec: &CompositeResourceSpec{
+				Metadata: ObjectMeta{},
+				Spec: CompositeResourceSpec{
 					// We don't mind this empty list being here because it's
 					// not exposed as part of our GraphQL API. We use it instead
 					// to resolve the resources array.
-					ResourceReferences: []core.ObjectReference{},
+					ResourceReferences: []corev1.ObjectReference{},
 				},
 			},
 		},
@@ -105,7 +105,7 @@ func TestGetCompositeResource(t *testing.T) {
 
 			// metav1.Time trims timestamps to second resolution.
 			if diff := cmp.Diff(tc.want, got,
-				cmpopts.IgnoreFields(CompositeResource{}, "Unstructured"),
+				cmpopts.IgnoreFields(CompositeResource{}, "PavedAccess"),
 				cmpopts.EquateApproxTime(1*time.Second),
 				cmp.AllowUnexported(ObjectMeta{}),
 			); diff != "" {
@@ -151,15 +151,15 @@ func TestGetCompositeResourceClaim(t *testing.T) {
 				},
 				APIVersion: "example.org/v1",
 				Kind:       "CompositeResource",
-				Metadata: &ObjectMeta{
-					Namespace: pointer.StringPtr("default"),
+				Metadata: ObjectMeta{
+					Namespace: ptr.To("default"),
 					Name:      "cool",
 				},
-				Spec: &CompositeResourceClaimSpec{
-					CompositionSelector:               &LabelSelector{MatchLabels: map[string]string{"cool": "very"}},
-					CompositionReference:              &corev1.ObjectReference{Name: "coolcmp"},
-					ResourceReference:                 &corev1.ObjectReference{Name: "coolxr"},
-					WritesConnectionSecretToReference: &xpv1.SecretReference{Namespace: "default", Name: "coolsecret"},
+				Spec: CompositeResourceClaimSpec{
+					CompositionSelector:              &LabelSelector{MatchLabels: map[string]string{"cool": "very"}},
+					CompositionReference:             &corev1.ObjectReference{Name: "coolcmp"},
+					ResourceReference:                &corev1.ObjectReference{Name: "coolxr"},
+					WriteConnectionSecretToReference: &xpv1.SecretReference{Namespace: "default", Name: "coolsecret"},
 				},
 				Status: &CompositeResourceClaimStatus{
 					Conditions: []Condition{{}},
@@ -173,8 +173,8 @@ func TestGetCompositeResourceClaim(t *testing.T) {
 			reason: "Absent optional fields should be absent in our model",
 			u:      &kunstructured.Unstructured{Object: make(map[string]interface{})},
 			want: CompositeResourceClaim{
-				Metadata: &ObjectMeta{},
-				Spec:     &CompositeResourceClaimSpec{},
+				Metadata: ObjectMeta{},
+				Spec:     CompositeResourceClaimSpec{},
 			},
 		},
 	}
@@ -185,7 +185,7 @@ func TestGetCompositeResourceClaim(t *testing.T) {
 
 			// metav1.Time trims timestamps to second resolution.
 			if diff := cmp.Diff(tc.want, got,
-				cmpopts.IgnoreFields(CompositeResourceClaim{}, "Unstructured"),
+				cmpopts.IgnoreFields(CompositeResourceClaim{}, "PavedAccess"),
 				cmpopts.EquateApproxTime(1*time.Second),
 				cmp.AllowUnexported(ObjectMeta{}),
 			); diff != "" {

@@ -16,12 +16,13 @@ package opentelemetry
 
 import (
 	"context"
+	"log"
 	"time"
 
 	"github.com/99designs/gqlgen/graphql"
-	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/global"
-	"go.opentelemetry.io/otel/metric/unit"
+	"go.opentelemetry.io/otel/exporters/prometheus"
+	api "go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/sdk/metric"
 )
 
 // A MetricEmitter that exports OpenTelemetry metrics.
@@ -34,34 +35,74 @@ var _ interface {
 	graphql.FieldInterceptor
 } = MetricEmitter{}
 
-// OpenTelemetry metrics.
 var (
-	meter = global.GetMeterProvider().Meter("crossplane.io/xgql")
-
-	reqStarted = metric.Must(meter).NewInt64Counter("request.started.total",
-		metric.WithDescription("Total number of requests started"),
-		metric.WithUnit(unit.Dimensionless))
-
-	reqCompleted = metric.Must(meter).NewInt64Counter("request.completed.total",
-		metric.WithDescription("Total number of requests completed"),
-		metric.WithUnit(unit.Dimensionless))
-
-	reqDuration = metric.Must(meter).NewInt64Histogram("request.duration.ms",
-		metric.WithDescription("The time taken to complete a request"),
-		metric.WithUnit(unit.Milliseconds))
-
-	resStarted = metric.Must(meter).NewInt64Counter("resolver.started.total",
-		metric.WithDescription("Total number of resolvers started"),
-		metric.WithUnit(unit.Dimensionless))
-
-	resCompleted = metric.Must(meter).NewInt64Counter("resolver.completed.total",
-		metric.WithDescription("Total number of resolvers completed"),
-		metric.WithUnit(unit.Dimensionless))
-
-	resDuration = metric.Must(meter).NewInt64Histogram("resolver.duration.ms",
-		metric.WithDescription("The time taken to resolve a field"),
-		metric.WithUnit(unit.Milliseconds))
+	reqStarted   api.Int64Counter
+	reqCompleted api.Int64Counter
+	reqDuration  api.Float64Histogram
+	resStarted   api.Int64Counter
+	resCompleted api.Int64Counter
+	resDuration  api.Float64Histogram
 )
+
+// OpenTelemetry metrics.
+func init() {
+	var err error
+
+	exporter, err := prometheus.New()
+	if err != nil {
+		log.Fatal(err)
+	}
+	provider := metric.NewMeterProvider(metric.WithReader(exporter))
+	meter := provider.Meter("crossplane.io/xgql")
+
+	reqStarted, err = meter.Int64Counter("request.started.total",
+		api.WithDescription("Total number of requests started"),
+		api.WithUnit("1"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	reqCompleted, err = meter.Int64Counter("request.completed.total",
+		api.WithDescription("Total number of requests completed"),
+		api.WithUnit("1"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	reqDuration, err = meter.Float64Histogram("request.duration.ms",
+		api.WithDescription("The time taken to complete a request"),
+		api.WithUnit("ms"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	resStarted, err = meter.Int64Counter("resolver.started.total",
+		api.WithDescription("Total number of resolvers started"),
+		api.WithUnit("1"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	resCompleted, err = meter.Int64Counter("resolver.completed.total",
+		api.WithDescription("Total number of resolvers completed"),
+		api.WithUnit("1"),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	resDuration, err = meter.Float64Histogram("resolver.duration.ms",
+		api.WithDescription("The time taken to resolve a field"),
+		api.WithUnit("ms"),
+	)
+	if err != nil {
+		panic(err)
+	}
+}
 
 // ExtensionName of this extension.
 func (t MetricEmitter) ExtensionName() string {
@@ -77,7 +118,7 @@ func (t MetricEmitter) Validate(schema graphql.ExecutableSchema) error {
 func (t MetricEmitter) InterceptOperation(ctx context.Context, next graphql.OperationHandler) graphql.ResponseHandler {
 	if graphql.HasOperationContext(ctx) {
 		oc := graphql.GetOperationContext(ctx)
-		reqStarted.Add(ctx, 1, operation.String(oc.OperationName))
+		reqStarted.Add(ctx, 1, api.WithAttributes(operation.String(oc.OperationName)))
 	}
 	return next(ctx)
 }
@@ -88,8 +129,9 @@ func (t MetricEmitter) InterceptResponse(ctx context.Context, next graphql.Respo
 		errs := graphql.GetErrors(ctx)
 		oc := graphql.GetOperationContext(ctx)
 		ms := time.Since(oc.Stats.OperationStart).Milliseconds()
-		reqCompleted.Add(ctx, 1, operation.String(oc.OperationName), success.Bool(len(errs) > 0))
-		reqDuration.Record(ctx, ms, operation.String(oc.OperationName), success.Bool(len(errs) > 0))
+		attrs := api.WithAttributes(operation.String(oc.OperationName), success.Bool(len(errs) > 0))
+		reqCompleted.Add(ctx, 1, attrs)
+		reqDuration.Record(ctx, float64(ms), attrs)
 	}
 
 	return next(ctx)
@@ -102,7 +144,8 @@ func (t MetricEmitter) InterceptField(ctx context.Context, next graphql.Resolver
 		return next(ctx)
 	}
 
-	resStarted.Add(ctx, 1, object.String(fc.Object), field.String(fc.Field.Name))
+	attrs := api.WithAttributes(object.String(fc.Object), field.String(fc.Field.Name))
+	resStarted.Add(ctx, 1, attrs)
 
 	started := time.Now()
 	rsp, err := next(ctx)
@@ -110,8 +153,8 @@ func (t MetricEmitter) InterceptField(ctx context.Context, next graphql.Resolver
 	ms := time.Since(started).Milliseconds()
 	errs := graphql.GetFieldErrors(ctx, fc)
 
-	resCompleted.Add(ctx, 1, object.String(fc.Object), field.String(fc.Field.Name), success.Bool(errs != nil))
-	resDuration.Record(ctx, ms, object.String(fc.Object), field.String(fc.Field.Name), success.Bool(errs != nil))
+	resCompleted.Add(ctx, 1, attrs, api.WithAttributes(success.Bool(errs != nil)))
+	resDuration.Record(ctx, float64(ms), attrs, api.WithAttributes(success.Bool(errs != nil)))
 
 	return rsp, err
 }

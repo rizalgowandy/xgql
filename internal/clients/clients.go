@@ -19,11 +19,10 @@ import (
 	"context"
 	"crypto/rand"
 	"io"
+	"net/http"
 	"sync"
 	"time"
 
-	"github.com/pkg/errors"
-	"golang.org/x/time/rate"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
@@ -32,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
 
 	"github.com/upbound/xgql/internal/auth"
@@ -41,6 +41,7 @@ import (
 const (
 	errNewClient        = "cannot create new write client"
 	errNewCache         = "cannot create new read cache"
+	errNewHTTPClient    = "cannot create new HTTP client"
 	errDelegClient      = "cannot create cache-backed client"
 	errWaitForCacheSync = "cannot sync client cache"
 )
@@ -50,6 +51,10 @@ type NewCacheFn func(cfg *rest.Config, o cache.Options) (cache.Cache, error)
 
 // A NewClientFn creates a new controller-runtime client.
 type NewClientFn func(cfg *rest.Config, o client.Options) (client.Client, error)
+
+// A NewCacheMiddlewareFn can be used to wrap a new cache function with
+// middleware.
+type NewCacheMiddlewareFn func(NewCacheFn) NewCacheFn
 
 // The default new cache and new controller functions.
 var (
@@ -64,11 +69,8 @@ func Config() (*rest.Config, error) {
 		return nil, errors.Wrap(err, "cannot create in-cluster configuration")
 	}
 
-	// ctrl.GetConfig tunes QPS and burst for Kubernetes controllers. We're not
-	// a controller and we expect to be creating many clients, so we tune these
-	// back down to the client-go defaults.
-	cfg.QPS = 5
-	cfg.Burst = 20
+	cfg.QPS = 50
+	cfg.Burst = 300
 
 	cfg.UserAgent = "xgql/" + version.Version
 
@@ -82,12 +84,12 @@ func Config() (*rest.Config, error) {
 // discovery process may burst up to 100 API server requests per second, and
 // average 20 requests per second. Rediscovery may not happen more frequently
 // than once every 20 seconds.
-func RESTMapper(cfg *rest.Config) (meta.RESTMapper, error) {
+func RESTMapper(cfg *rest.Config, httpClient *http.Client) (meta.RESTMapper, error) {
 	dcfg := rest.CopyConfig(cfg)
-	dcfg.QPS = 20
-	dcfg.Burst = 100
+	dcfg.QPS = 50
+	dcfg.Burst = 300
 
-	return apiutil.NewDynamicRESTMapper(dcfg, apiutil.WithLimiter(rate.NewLimiter(rate.Limit(0.05), 1)))
+	return apiutil.NewDynamicRESTMapper(dcfg, httpClient)
 }
 
 // Anonymize the supplied config by returning a copy with all authentication
@@ -114,6 +116,8 @@ func Anonymize(cfg *rest.Config) *rest.Config {
 // type the client is asked to get or list. Clients (and their caches) expire
 // and are garbage collected if they are unused for five minutes.
 type Cache struct {
+	// a context that will be valid for the lifetime of Cache.
+	ctx    context.Context
 	active map[string]*session
 	mx     sync.RWMutex
 
@@ -168,6 +172,17 @@ func DoNotCache(o []client.Object) CacheOption {
 	}
 }
 
+// UseNewCacheMiddleware configures the cache to use the supplied middleware
+// functions when creating new caches. This can be used to wrap the cache's
+// default new cache function with additional functionality.
+func UseNewCacheMiddleware(fns ...NewCacheMiddlewareFn) CacheOption {
+	return func(c *Cache) {
+		for _, fn := range fns {
+			c.newCache = fn(c.newCache)
+		}
+	}
+}
+
 // NewCache creates a cache of Kubernetes clients. Clients use the supplied
 // scheme, and connect to the API server using a copy of the supplied REST
 // config with a specific bearer token injected.
@@ -176,6 +191,7 @@ func NewCache(s *runtime.Scheme, c *rest.Config, o ...CacheOption) *Cache {
 	_, _ = io.ReadFull(rand.Reader, salt)
 
 	ch := &Cache{
+		ctx:    context.Background(),
 		active: make(map[string]*session),
 
 		cfg:    c,
@@ -197,74 +213,63 @@ func NewCache(s *runtime.Scheme, c *rest.Config, o ...CacheOption) *Cache {
 }
 
 type getOptions struct {
-	Namespace string
 }
 
 // A GetOption modifies the kind of client returned.
 type GetOption func(o *getOptions)
 
-// ForNamespace returns a client backed by a cache scoped to the supplied
-// namespace.
-func ForNamespace(n string) GetOption {
-	return func(o *getOptions) {
-		o.Namespace = n
-	}
-}
-
 // Get a client that uses the specified bearer token.
-func (c *Cache) Get(cr auth.Credentials, o ...GetOption) (client.Client, error) {
-	opts := &getOptions{}
-	for _, fn := range o {
-		fn(opts)
-	}
-
+func (c *Cache) Get(cr auth.Credentials, o ...GetOption) (client.Client, error) { //nolint:gocyclo
 	extra := bytes.Buffer{}
 	extra.Write(c.salt)
-	extra.WriteString(opts.Namespace)
 	id := cr.Hash(extra.Bytes())
 
 	log := c.log.WithValues("client-id", id)
-	if opts.Namespace != "" {
-		log = log.WithValues("namespace", opts.Namespace)
-	}
 
 	c.mx.RLock()
 	sn, ok := c.active[id]
 	c.mx.RUnlock()
 
 	if ok {
-		log.Debug("Used existing client")
-		return sn, nil
+		log.Debug("Used existing cached client",
+			"new-expiry", time.Now().Add(c.expiry),
+		)
+		sn.expiration.Reset(c.expiry)
+		return sn.client, nil
 	}
 
 	started := time.Now()
 	cfg := cr.Inject(c.cfg)
-
-	wc, err := c.newClient(cfg, client.Options{Scheme: c.scheme, Mapper: c.mapper})
+	hc, err := rest.HTTPClientFor(cfg)
 	if err != nil {
-		return nil, errors.Wrap(err, errNewClient)
+		return nil, errors.Wrap(err, errNewHTTPClient)
 	}
-
-	ca, err := c.newCache(cfg, cache.Options{Scheme: c.scheme, Mapper: c.mapper, Namespace: opts.Namespace})
+	ca, err := c.newCache(cfg, cache.Options{
+		HTTPClient: hc,
+		Scheme:     c.scheme,
+		Mapper:     c.mapper,
+	})
 	if err != nil {
 		return nil, errors.Wrap(err, errNewCache)
 	}
 
-	dci := client.NewDelegatingClientInput{
-		CacheReader:     ca,
-		Client:          wc,
-		UncachedObjects: c.nocache,
-
-		// TODO(negz): Don't cache unstructured objects? Doing so allows us to
-		// cache object types that aren't known at build time, like managed
-		// resources and composite resources. On the other hand it could lead to
-		// the cache starting a watch on any kind of resource it encounters,
-		// e.g. arbitrary owner references.
-		CacheUnstructured: true,
-	}
-	dc, err := client.NewDelegatingClient(dci)
+	wc, err := c.newClient(cfg, client.Options{
+		HTTPClient: hc,
+		Scheme:     c.scheme,
+		Mapper:     c.mapper,
+		Cache: &client.CacheOptions{
+			Reader:     ca,
+			DisableFor: c.nocache,
+			// TODO(negz): Don't cache unstructured objects? Doing so allows us to
+			// cache object types that aren't known at build time, like managed
+			// resources and composite resources. On the other hand it could lead to
+			// the cache starting a watch on any kind of resource it encounters,
+			// e.g. arbitrary owner references.
+			Unstructured: true,
+		},
+	})
 	if err != nil {
-		return nil, errors.Wrap(err, errDelegClient)
+		return nil, errors.Wrap(err, errNewClient)
 	}
 
 	// We use a distinct s.expiry ticker rather than a context deadline or timeout
@@ -272,10 +277,19 @@ func (c *Cache) Get(cr auth.Credentials, o ...GetOption) (client.Client, error) 
 	// is possible to 'reset' (i.e. extend) a ticker.
 	expiration := &tickerExpiration{t: time.NewTicker(c.expiry)}
 	newExpiry := time.Now().Add(c.expiry)
-	ctx, cancel := context.WithCancel(context.Background())
-	sn = &session{client: dc, cancel: cancel, expiry: c.expiry, expiration: expiration, log: log}
+	ctx, cancel := context.WithCancel(c.ctx)
+	sn = &session{client: wc, cancel: cancel, expiration: expiration}
 
 	c.mx.Lock()
+	// another gorouting might have set the session.
+	if sn, ok := c.active[id]; ok {
+		c.mx.Unlock()
+		log.Debug("Used existing cached client",
+			"duration", time.Since(started),
+			"new-expiry", newExpiry,
+		)
+		return sn.client, nil
+	}
 	c.active[id] = sn
 	c.mx.Unlock()
 
@@ -295,13 +309,11 @@ func (c *Cache) Get(cr auth.Credentials, o ...GetOption) (client.Client, error) 
 		case <-expiration.C():
 			// We expired, and should remove ourself from the session cache.
 			log.Debug("Client expired")
-			c.remove(id)
 		case <-ctx.Done():
 			log.Debug("Client stopped")
-			// We're done for some other reason (e.g. the cache crashed). We assume
-			// whatever cancelled our context did so by calling done() - we just need
-			// to let this goroutine finish.
+			// We're done for some other reason (e.g. the cache crashed).
 		}
+		c.remove(id)
 	}()
 
 	if !ca.WaitForCacheSync(ctx) {
@@ -309,12 +321,12 @@ func (c *Cache) Get(cr auth.Credentials, o ...GetOption) (client.Client, error) 
 		return nil, errors.New(errWaitForCacheSync)
 	}
 
-	log.Debug("Created client",
+	log.Debug("Created cached client",
 		"duration", time.Since(started),
 		"new-expiry", newExpiry,
 	)
 
-	return sn, nil
+	return sn.client, nil
 }
 
 func (c *Cache) remove(id string) {
@@ -344,128 +356,5 @@ func (e *tickerExpiration) C() <-chan time.Time   { return e.t.C }
 type session struct {
 	client     client.Client
 	cancel     context.CancelFunc
-	expiry     time.Duration
 	expiration expiration
-
-	log logging.Logger
-}
-
-func (s *session) Get(ctx context.Context, key client.ObjectKey, obj client.Object) error {
-	t := time.Now()
-	s.expiration.Reset(s.expiry)
-	err := s.client.Get(ctx, key, obj)
-	s.log.Debug("Client called",
-		"operation", "Get",
-		"duration", time.Since(t),
-		"new-expiry", t.Add(s.expiry),
-	)
-	return err
-}
-
-func (s *session) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
-	t := time.Now()
-	s.expiration.Reset(s.expiry)
-	err := s.client.List(ctx, list, opts...)
-	s.log.Debug("Client called",
-		"operation", "List",
-		"duration", time.Since(t),
-		"new-expiry", t.Add(s.expiry),
-	)
-	return err
-}
-
-func (s *session) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
-	t := time.Now()
-	s.expiration.Reset(s.expiry)
-	err := s.client.Create(ctx, obj, opts...)
-	s.log.Debug("Client called",
-		"operation", "Create",
-		"duration", time.Since(t),
-		"new-expiry", t.Add(s.expiry),
-	)
-	return err
-}
-
-func (s *session) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
-	t := time.Now()
-	s.expiration.Reset(s.expiry)
-	err := s.client.Delete(ctx, obj, opts...)
-	s.log.Debug("Client called",
-		"operation", "Delete",
-		"duration", time.Since(t),
-		"new-expiry", t.Add(s.expiry),
-	)
-	return err
-}
-
-func (s *session) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
-	t := time.Now()
-	s.expiration.Reset(s.expiry)
-	err := s.client.Update(ctx, obj, opts...)
-	s.log.Debug("Client called",
-		"operation", "Update",
-		"duration", time.Since(t),
-		"new-expiry", t.Add(s.expiry),
-	)
-	return err
-}
-
-func (s *session) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-	t := time.Now()
-	s.expiration.Reset(s.expiry)
-	err := s.client.Patch(ctx, obj, patch, opts...)
-	s.log.Debug("Client called",
-		"operation", "Patch",
-		"duration", time.Since(t),
-		"new-expiry", t.Add(s.expiry),
-	)
-	return err
-}
-
-func (s *session) DeleteAllOf(ctx context.Context, obj client.Object, opts ...client.DeleteAllOfOption) error {
-	t := time.Now()
-	s.expiration.Reset(s.expiry)
-	err := s.client.DeleteAllOf(ctx, obj, opts...)
-	s.log.Debug("Client called",
-		"operation", "DeleteallOf",
-		"duration", time.Since(t),
-		"new-expiry", t.Add(s.expiry),
-	)
-	return err
-}
-
-func (s *session) Status() client.StatusWriter {
-	t := time.Now()
-	s.expiration.Reset(s.expiry)
-	sw := s.client.Status()
-	s.log.Debug("Client called",
-		"operation", "Status",
-		"duration", time.Since(t),
-		"new-expiry", t.Add(s.expiry),
-	)
-	return sw
-}
-
-func (s *session) Scheme() *runtime.Scheme {
-	t := time.Now()
-	s.expiration.Reset(s.expiry)
-	sc := s.client.Scheme()
-	s.log.Debug("Client called",
-		"operation", "Scheme",
-		"duration", time.Since(t),
-		"new-expiry", t.Add(s.expiry),
-	)
-	return sc
-}
-
-func (s *session) RESTMapper() meta.RESTMapper {
-	t := time.Now()
-	s.expiration.Reset(s.expiry)
-	rm := s.client.RESTMapper()
-	s.log.Debug("Client called",
-		"operation", "Scheme",
-		"duration", time.Since(t),
-		"new-expiry", t.Add(s.expiry),
-	)
-	return rm
 }

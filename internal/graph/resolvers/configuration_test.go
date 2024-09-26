@@ -21,7 +21,6 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/pkg/errors"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -29,6 +28,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/pkg/fieldpath"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
 	extv1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
@@ -79,7 +80,7 @@ func TestConfigurationRevisions(t *testing.T) {
 		obj *model.Configuration
 	}
 	type want struct {
-		crc  *model.ConfigurationRevisionConnection
+		crc  model.ConfigurationRevisionConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -100,7 +101,7 @@ func TestConfigurationRevisions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -116,7 +117,7 @@ func TestConfigurationRevisions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListConfigRevs).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListConfigRevs)),
 				},
 			},
 		},
@@ -135,11 +136,11 @@ func TestConfigurationRevisions(t *testing.T) {
 			args: args{
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 				obj: &model.Configuration{
-					Metadata: &model.ObjectMeta{UID: uid},
+					Metadata: model.ObjectMeta{UID: uid},
 				},
 			},
 			want: want{
-				crc: &model.ConfigurationRevisionConnection{
+				crc: model.ConfigurationRevisionConnection{
 					Nodes:      []model.ConfigurationRevision{gactive, ginactive},
 					TotalCount: 2,
 				},
@@ -162,7 +163,7 @@ func TestConfigurationRevisions(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.Revisions(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.crc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.crc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.Revisions(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -225,7 +226,7 @@ func TestConfigurationActiveRevision(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -241,7 +242,7 @@ func TestConfigurationActiveRevision(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListConfigRevs).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListConfigRevs)),
 				},
 			},
 		},
@@ -260,7 +261,7 @@ func TestConfigurationActiveRevision(t *testing.T) {
 			args: args{
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 				obj: &model.Configuration{
-					Metadata: &model.ObjectMeta{UID: uid},
+					Metadata: model.ObjectMeta{UID: uid},
 				},
 			},
 			want: want{
@@ -282,7 +283,7 @@ func TestConfigurationActiveRevision(t *testing.T) {
 			args: args{
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 				obj: &model.Configuration{
-					Metadata: &model.ObjectMeta{UID: uid},
+					Metadata: model.ObjectMeta{UID: uid},
 				},
 			},
 			want: want{
@@ -306,7 +307,7 @@ func TestConfigurationActiveRevision(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.ActiveRevision(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.pr, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.pr, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.ActiveRevision(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -324,7 +325,7 @@ func TestConfigurationRevisionStatusObjects(t *testing.T) {
 		obj *model.ConfigurationRevisionStatus
 	}
 	type want struct {
-		krc  *model.KubernetesResourceConnection
+		krc  model.KubernetesResourceConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -345,7 +346,7 @@ func TestConfigurationRevisionStatusObjects(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -365,7 +366,7 @@ func TestConfigurationRevisionStatusObjects(t *testing.T) {
 				},
 			},
 			want: want{
-				krc: &model.KubernetesResourceConnection{
+				krc: model.KubernetesResourceConnection{
 					Nodes:      []model.KubernetesResource{},
 					TotalCount: 0,
 				},
@@ -399,14 +400,14 @@ func TestConfigurationRevisionStatusObjects(t *testing.T) {
 				},
 			},
 			want: want{
-				krc: &model.KubernetesResourceConnection{
+				krc: model.KubernetesResourceConnection{
 					Nodes: []model.KubernetesResource{
 						gcmp,
 					},
 					TotalCount: 1,
 				},
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetXRD).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetXRD)),
 				},
 			},
 		},
@@ -438,14 +439,14 @@ func TestConfigurationRevisionStatusObjects(t *testing.T) {
 				},
 			},
 			want: want{
-				krc: &model.KubernetesResourceConnection{
+				krc: model.KubernetesResourceConnection{
 					Nodes: []model.KubernetesResource{
 						gxrd,
 					},
 					TotalCount: 1,
 				},
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetComp).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetComp)),
 				},
 			},
 		},
@@ -466,7 +467,7 @@ func TestConfigurationRevisionStatusObjects(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ns.Objects(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.krc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.krc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\ns.Objects(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})

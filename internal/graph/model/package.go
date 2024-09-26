@@ -20,39 +20,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 
-	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	pkgv1 "github.com/crossplane/crossplane/apis/pkg/v1"
 )
-
-// A ProviderRevisionStatus reflects the observed state of a ProviderRevision.
-type ProviderRevisionStatus struct {
-	Conditions            []Condition  `json:"conditions"`
-	FoundDependencies     *int         `json:"foundDependencies"`
-	InstalledDependencies *int         `json:"installedDependencies"`
-	InvalidDependencies   *int         `json:"invalidDependencies"`
-	PermissionRequests    []PolicyRule `json:"permissionRequests"`
-
-	ObjectRefs []xpv1.TypedReference
-}
-
-// IsConditionedStatus indicates that ProviderRevisionStatus satisfies the
-// KubernetesResource GraphQL (and corresponding Go) interface.
-func (ProviderRevisionStatus) IsConditionedStatus() {}
-
-// A ConfigurationRevisionStatus reflects the observed state of a ConfigurationRevision.
-type ConfigurationRevisionStatus struct {
-	Conditions            []Condition  `json:"conditions"`
-	FoundDependencies     *int         `json:"foundDependencies"`
-	InstalledDependencies *int         `json:"installedDependencies"`
-	InvalidDependencies   *int         `json:"invalidDependencies"`
-	PermissionRequests    []PolicyRule `json:"permissionRequests"`
-
-	ObjectRefs []xpv1.TypedReference
-}
-
-// IsConditionedStatus indicates that ConfigurationRevisionStatus satisfies the
-// KubernetesResource GraphQL (and corresponding Go) interface.
-func (ConfigurationRevisionStatus) IsConditionedStatus() {}
 
 // GetRevisionActivationPolicy from the supplied Crossplane policy.
 func GetRevisionActivationPolicy(in *pkgv1.RevisionActivationPolicy) *RevisionActivationPolicy {
@@ -135,7 +104,7 @@ func GetProvider(p *pkgv1.Provider) Provider {
 		APIVersion: p.APIVersion,
 		Kind:       p.Kind,
 		Metadata:   GetObjectMeta(p),
-		Spec: &ProviderSpec{
+		Spec: ProviderSpec{
 			Package:                     p.Spec.Package,
 			RevisionActivationPolicy:    GetRevisionActivationPolicy(p.Spec.RevisionActivationPolicy),
 			RevisionHistoryLimit:        getIntPtr(p.Spec.RevisionHistoryLimit),
@@ -143,8 +112,10 @@ func GetProvider(p *pkgv1.Provider) Provider {
 			IgnoreCrossplaneConstraints: p.Spec.IgnoreCrossplaneConstraints,
 			SkipDependencyResolution:    p.Spec.SkipDependencyResolution,
 		},
-		Status:       GetProviderStatus(p.Status),
-		Unstructured: unstruct(p),
+		Status: GetProviderStatus(p.Status),
+		PavedAccess: PavedAccess{
+			Paved: paveObject(p),
+		},
 	}
 }
 
@@ -187,7 +158,7 @@ func GetProviderRevision(pr *pkgv1.ProviderRevision) ProviderRevision {
 		APIVersion: pr.APIVersion,
 		Kind:       pr.Kind,
 		Metadata:   GetObjectMeta(pr),
-		Spec: &ProviderRevisionSpec{
+		Spec: ProviderRevisionSpec{
 			DesiredState:                GetPackageRevisionDesiredState(pr.Spec.DesiredState),
 			Package:                     pr.Spec.Package,
 			PackagePullPolicy:           GetPackagePullPolicy(pr.Spec.PackagePullPolicy),
@@ -195,8 +166,10 @@ func GetProviderRevision(pr *pkgv1.ProviderRevision) ProviderRevision {
 			IgnoreCrossplaneConstraints: pr.Spec.IgnoreCrossplaneConstraints,
 			SkipDependencyResolution:    pr.Spec.SkipDependencyResolution,
 		},
-		Status:       GetProviderRevisionStatus(pr.Status),
-		Unstructured: unstruct(pr),
+		Status: GetProviderRevisionStatus(pr.Status),
+		PavedAccess: PavedAccess{
+			Paved: paveObject(pr),
+		},
 	}
 }
 
@@ -227,7 +200,7 @@ func GetConfiguration(c *pkgv1.Configuration) Configuration {
 		APIVersion: c.APIVersion,
 		Kind:       c.Kind,
 		Metadata:   GetObjectMeta(c),
-		Spec: &ConfigurationSpec{
+		Spec: ConfigurationSpec{
 			Package:                     c.Spec.Package,
 			RevisionActivationPolicy:    GetRevisionActivationPolicy(c.Spec.RevisionActivationPolicy),
 			RevisionHistoryLimit:        getIntPtr(c.Spec.RevisionHistoryLimit),
@@ -235,8 +208,10 @@ func GetConfiguration(c *pkgv1.Configuration) Configuration {
 			IgnoreCrossplaneConstraints: c.Spec.IgnoreCrossplaneConstraints,
 			SkipDependencyResolution:    c.Spec.SkipDependencyResolution,
 		},
-		Status:       GetConfigurationStatus(c.Status),
-		Unstructured: unstruct(c),
+		Status: GetConfigurationStatus(c.Status),
+		PavedAccess: PavedAccess{
+			Paved: paveObject(c),
+		},
 	}
 }
 
@@ -268,7 +243,7 @@ func GetConfigurationRevision(cr *pkgv1.ConfigurationRevision) ConfigurationRevi
 		APIVersion: cr.APIVersion,
 		Kind:       cr.Kind,
 		Metadata:   GetObjectMeta(cr),
-		Spec: &ConfigurationRevisionSpec{
+		Spec: ConfigurationRevisionSpec{
 			DesiredState:                GetPackageRevisionDesiredState(cr.Spec.DesiredState),
 			Package:                     cr.Spec.Package,
 			PackagePullPolicy:           GetPackagePullPolicy(cr.Spec.PackagePullPolicy),
@@ -276,7 +251,9 @@ func GetConfigurationRevision(cr *pkgv1.ConfigurationRevision) ConfigurationRevi
 			IgnoreCrossplaneConstraints: cr.Spec.IgnoreCrossplaneConstraints,
 			SkipDependencyResolution:    cr.Spec.SkipDependencyResolution,
 		},
-		Status:       GetConfigurationRevisionStatus(cr.Status),
-		Unstructured: unstruct(cr),
+		Status: GetConfigurationRevisionStatus(cr.Status),
+		PavedAccess: PavedAccess{
+			Paved: paveObject(cr),
+		},
 	}
 }

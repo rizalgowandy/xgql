@@ -18,6 +18,7 @@ import (
 	kunstructured "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	"github.com/crossplane/crossplane-runtime/pkg/fieldpath"
 
 	"github.com/upbound/xgql/internal/unstructured"
 )
@@ -27,7 +28,7 @@ type ManagedResourceSpec struct {
 	ProviderConfigRef *ProviderConfigReference `json:"providerConfigRef"`
 	DeletionPolicy    *DeletionPolicy          `json:"deletionPolicy"`
 
-	WritesConnectionSecretToReference *xpv1.SecretReference
+	WriteConnectionSecretToReference *xpv1.SecretReference
 }
 
 // GetDeletionPolicy from the supplied Crossplane policy.
@@ -74,12 +75,14 @@ func GetManagedResource(u *kunstructured.Unstructured) ManagedResource {
 		APIVersion: mg.GetAPIVersion(),
 		Kind:       mg.GetKind(),
 		Metadata:   GetObjectMeta(mg),
-		Spec: &ManagedResourceSpec{
-			WritesConnectionSecretToReference: mg.GetWriteConnectionSecretToReference(),
-			ProviderConfigRef:                 GetProviderConfigReference(mg.GetProviderConfigReference()),
-			DeletionPolicy:                    GetDeletionPolicy(mg.GetDeletionPolicy()),
+		Spec: ManagedResourceSpec{
+			WriteConnectionSecretToReference: mg.GetWriteConnectionSecretToReference(),
+			ProviderConfigRef:                GetProviderConfigReference(mg.GetProviderConfigReference()),
+			DeletionPolicy:                   GetDeletionPolicy(mg.GetDeletionPolicy()),
 		},
-		Status:       GetManagedResourceStatus(mg),
-		Unstructured: unstruct(mg),
+		Status: GetManagedResourceStatus(mg),
+		PavedAccess: PavedAccess{
+			Paved: fieldpath.Pave(u.Object),
+		},
 	}
 }

@@ -16,18 +16,20 @@ package resolvers
 
 import (
 	"context"
+	"sort"
 	"testing"
 
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/pkg/errors"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/pkg/fieldpath"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
 
 	"github.com/upbound/xgql/internal/auth"
@@ -55,7 +57,7 @@ func TestEvent(t *testing.T) {
 		involved *corev1.ObjectReference
 	}
 	type want struct {
-		ec   *model.EventConnection
+		ec   model.EventConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -76,7 +78,7 @@ func TestEvent(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -92,7 +94,7 @@ func TestEvent(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListEvents).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListEvents)),
 				},
 			},
 		},
@@ -110,7 +112,7 @@ func TestEvent(t *testing.T) {
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 			},
 			want: want{
-				ec: &model.EventConnection{
+				ec: model.EventConnection{
 					Nodes:      []model.Event{model.GetEvent(&related), model.GetEvent(&unrelated)},
 					TotalCount: 2,
 				},
@@ -131,7 +133,7 @@ func TestEvent(t *testing.T) {
 				involved: involved,
 			},
 			want: want{
-				ec: &model.EventConnection{
+				ec: model.EventConnection{
 					Nodes:      []model.Event{model.GetEvent(&related)},
 					TotalCount: 1,
 				},
@@ -154,7 +156,7 @@ func TestEvent(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ns.Resolve(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.ec, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.ec, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\ns.Resolve(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -301,7 +303,7 @@ func TestEventInvolvedObject(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -320,7 +322,7 @@ func TestEventInvolvedObject(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetInvolved).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetInvolved)),
 				},
 			},
 		},
@@ -358,8 +360,112 @@ func TestEventInvolvedObject(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ns.InvolvedObject(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.kr, got, cmpopts.IgnoreFields(model.GenericResource{}, "Unstructured"), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.kr, got, cmpopts.IgnoreFields(model.GenericResource{}, "PavedAccess"), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\ns.InvolvedObject(...): -want, +got:\n%s\n", tc.reason, diff)
+			}
+		})
+	}
+}
+
+func TestTimeOrderedEventIndicesLimit(t *testing.T) {
+	tests := map[string]struct {
+		reason             string
+		events             []corev1.Event
+		upperBound, target int
+		want               []string // reasons
+	}{
+		"EmptyInput": {
+			reason:     "empty input",
+			events:     []corev1.Event{},
+			upperBound: 5, target: 3,
+			want: []string{},
+		},
+		"FewerThanMax": {
+			reason: "fewer events than allowed",
+			events: []corev1.Event{
+				{LastTimestamp: metav1.Unix(0, 0), Reason: "a"},
+				{LastTimestamp: metav1.Unix(1, 0), Reason: "b"},
+			},
+			upperBound: 5, target: 3,
+			want: []string{"a", "b"},
+		},
+		"SortedOutput": {
+			reason: "events were unsorted, but should be sorted in output",
+			events: []corev1.Event{
+				{LastTimestamp: metav1.Unix(2, 0), Reason: "a"},
+				{LastTimestamp: metav1.Unix(1, 0), Reason: "b"},
+				{LastTimestamp: metav1.Unix(3, 0), Reason: "c"},
+			},
+			upperBound: 5, target: 3,
+			want: []string{"b", "a", "c"},
+		},
+		"MoreThanAllowed": {
+			reason: "more events available than allowed",
+			events: []corev1.Event{
+				{LastTimestamp: metav1.Unix(2, 0), Reason: "a", Type: corev1.EventTypeWarning},
+				{LastTimestamp: metav1.Unix(1, 0), Reason: "b", Type: corev1.EventTypeWarning},
+				{LastTimestamp: metav1.Unix(3, 0), Reason: "c", Type: corev1.EventTypeWarning},
+				{LastTimestamp: metav1.Unix(0, 0), Reason: "d", Type: corev1.EventTypeWarning},
+			},
+			upperBound: 5, target: 3,
+			want: []string{"d", "b", "a"},
+		},
+		"EnoughWarnings": {
+			reason: "normal events are capped, and more warning are returned",
+			events: []corev1.Event{
+				{LastTimestamp: metav1.Unix(4, 0), Reason: "a"},
+				{LastTimestamp: metav1.Unix(2, 0), Reason: "b"},
+				{LastTimestamp: metav1.Unix(5, 0), Reason: "c"},
+				{LastTimestamp: metav1.Unix(0, 0), Reason: "d"},
+				{LastTimestamp: metav1.Unix(1, 0), Reason: "e", Type: corev1.EventTypeWarning},
+				{LastTimestamp: metav1.Unix(3, 0), Reason: "f", Type: corev1.EventTypeWarning},
+				{LastTimestamp: metav1.Unix(7, 0), Reason: "g", Type: corev1.EventTypeWarning},
+				{LastTimestamp: metav1.Unix(6, 0), Reason: "h", Type: corev1.EventTypeWarning},
+			},
+			upperBound: 10, target: 3,
+			want: []string{"d", "e", "b", "f", "a", "c", "h"},
+		},
+		"EnoughWarningsCapped": {
+			reason: "normal events are capped, and more warning are returned",
+			events: []corev1.Event{
+				{LastTimestamp: metav1.Unix(4, 0), Reason: "a"},
+				{LastTimestamp: metav1.Unix(2, 0), Reason: "b"},
+				{LastTimestamp: metav1.Unix(5, 0), Reason: "c"},
+				{LastTimestamp: metav1.Unix(0, 0), Reason: "d"},
+				{LastTimestamp: metav1.Unix(1, 0), Reason: "e", Type: corev1.EventTypeWarning},
+				{LastTimestamp: metav1.Unix(3, 0), Reason: "f", Type: corev1.EventTypeWarning},
+				{LastTimestamp: metav1.Unix(7, 0), Reason: "g", Type: corev1.EventTypeWarning},
+				{LastTimestamp: metav1.Unix(6, 0), Reason: "h", Type: corev1.EventTypeWarning},
+			},
+			upperBound: 5, target: 3,
+			want: []string{"d", "e", "b", "f", "a"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			ei := timeOrderedEventIndices{
+				indices: make([]int, len(tc.events)),
+				items:   tc.events,
+			}
+			for i := range tc.events {
+				ei.indices[i] = i
+			}
+
+			sort.Stable(ei)
+			models := ei.limit(tc.target, tc.upperBound)
+
+			got := make([]string, len(models))
+			for i := range models {
+				if models[i].Reason == nil {
+					got[i] = "nil"
+				} else {
+					got[i] = *models[i].Reason
+				}
+			}
+
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("\n%s\nei.limit(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
 	}

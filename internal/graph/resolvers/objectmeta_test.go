@@ -21,13 +21,13 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/pkg/errors"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
 
 	"github.com/upbound/xgql/internal/auth"
@@ -57,7 +57,7 @@ func TestObjectMetaOwners(t *testing.T) {
 		obj *model.ObjectMeta
 	}
 	type want struct {
-		oc   *model.OwnerConnection
+		oc   model.OwnerConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -78,7 +78,7 @@ func TestObjectMetaOwners(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -107,18 +107,18 @@ func TestObjectMetaOwners(t *testing.T) {
 						{
 							APIVersion: ctrl.GetAPIVersion(),
 							Kind:       ctrl.GetKind(),
-							Controller: pointer.BoolPtr(true),
+							Controller: ptr.To(true),
 						},
 					},
 				},
 			},
 			want: want{
-				oc: &model.OwnerConnection{
+				oc: model.OwnerConnection{
 					Nodes:      []model.Owner{{Resource: gown}},
 					TotalCount: 1,
 				},
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetOwner).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetOwner)),
 				},
 			},
 		},
@@ -139,7 +139,10 @@ func TestObjectMetaOwners(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.Owners(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.oc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.oc, got,
+				cmpopts.IgnoreUnexported(model.ObjectMeta{}),
+				cmpopts.IgnoreFields(model.GenericResource{}, "PavedAccess"),
+			); diff != "" {
 				t.Errorf("\n%s\nq.Owners(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -186,7 +189,7 @@ func TestObjectMetaController(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -204,14 +207,14 @@ func TestObjectMetaController(t *testing.T) {
 						{
 							APIVersion: ctrl.GetAPIVersion(),
 							Kind:       ctrl.GetKind(),
-							Controller: pointer.BoolPtr(true),
+							Controller: ptr.To(true),
 						},
 					},
 				},
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetOwner).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetOwner)),
 				},
 			},
 		},
@@ -233,7 +236,7 @@ func TestObjectMetaController(t *testing.T) {
 						{
 							APIVersion: ctrl.GetAPIVersion(),
 							Kind:       ctrl.GetKind(),
-							Controller: pointer.BoolPtr(true),
+							Controller: ptr.To(true),
 						},
 					},
 				},
@@ -281,7 +284,10 @@ func TestObjectMetaController(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.Controller(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.kr, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.kr, got,
+				cmpopts.IgnoreUnexported(model.ObjectMeta{}),
+				cmpopts.IgnoreFields(model.GenericResource{}, "PavedAccess"),
+			); diff != "" {
 				t.Errorf("\n%s\nq.Controller(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})

@@ -23,7 +23,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kschema "k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 )
 
 func TestGetEvent(t *testing.T) {
@@ -63,15 +63,15 @@ func TestGetEvent(t *testing.T) {
 				},
 				APIVersion: kschema.GroupVersion{Group: corev1.GroupName, Version: "v1"}.String(),
 				Kind:       "Event",
-				Metadata: &ObjectMeta{
+				Metadata: ObjectMeta{
 					Name: "cool",
 				},
 				Type:    &warn,
-				Reason:  pointer.StringPtr("BadStuff"),
-				Message: pointer.StringPtr("Bad stuff happened."),
+				Reason:  ptr.To("BadStuff"),
+				Message: ptr.To("Bad stuff happened."),
 				Count:   func() *int { i := 42; return &i }(),
 				Source: &EventSource{
-					Component: pointer.StringPtr("that-thing"),
+					Component: ptr.To("that-thing"),
 				},
 				FirstTime: &now,
 				LastTime:  &now,
@@ -81,7 +81,7 @@ func TestGetEvent(t *testing.T) {
 			reason: "Absent optional fields should be absent in our model",
 			s:      &corev1.Event{},
 			want: Event{
-				Metadata:  &ObjectMeta{},
+				Metadata:  ObjectMeta{},
 				FirstTime: &time.Time{},
 				LastTime:  &time.Time{},
 			},
@@ -91,7 +91,7 @@ func TestGetEvent(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := GetEvent(tc.s)
-			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(Event{}, "Unstructured"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(Event{}, "PavedAccess"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\nGetEvent(...): -want, +got\n:%s", tc.reason, diff)
 			}
 		})

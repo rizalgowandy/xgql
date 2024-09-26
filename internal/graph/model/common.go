@@ -15,19 +15,20 @@
 package model
 
 import (
+	"encoding/json"
 	"io"
 
 	"github.com/99designs/gqlgen/graphql"
-	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	kextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kunstructured "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/json"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/pkg/fieldpath"
 	extv1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 	pkgv1 "github.com/crossplane/crossplane/apis/pkg/v1"
 
@@ -117,46 +118,17 @@ func GetGenericResource(u *kunstructured.Unstructured) GenericResource {
 			Namespace:  u.GetNamespace(),
 			Name:       u.GetName(),
 		},
-		APIVersion:   u.GetAPIVersion(),
-		Kind:         u.GetKind(),
-		Metadata:     GetObjectMeta(u),
-		Unstructured: unstruct(u),
+		APIVersion: u.GetAPIVersion(),
+		Kind:       u.GetKind(),
+		Metadata:   GetObjectMeta(u),
+		PavedAccess: PavedAccess{
+			Paved: fieldpath.Pave(u.Object),
+		},
 	}
 }
 
-// A Secret holds secret data.
-type Secret struct {
-	// An opaque identifier that is unique across all types.
-	ID ReferenceID `json:"id"`
-
-	// The underlying Kubernetes API version of this resource.
-	APIVersion string `json:"apiVersion"`
-
-	// The underlying Kubernetes API kind of this resource.
-	Kind string `json:"kind"`
-
-	// Metadata that is common to all Kubernetes API resources.
-	Metadata *ObjectMeta `json:"metadata"`
-
-	// Type of this secret.
-	Type *string `json:"type"`
-
-	// An unstructured JSON representation of the underlying Kubernetes
-	// resource.
-	Unstructured []byte `json:"raw"`
-
-	data map[string]string
-}
-
-// IsNode indicates that a Secret satisfies the GraphQL Node interface.
-func (Secret) IsNode() {}
-
-// IsKubernetesResource indicates that a Secret satisfies the GraphQL
-// IsKubernetesResource interface.
-func (Secret) IsKubernetesResource() {}
-
 // Data of this secret.
-func (s *Secret) Data(keys []string) map[string]string {
+func (s Secret) Data(keys []string) map[string]string {
 	if keys == nil || s.data == nil {
 		return s.data
 	}
@@ -169,32 +141,8 @@ func (s *Secret) Data(keys []string) map[string]string {
 	return out
 }
 
-// A ConfigMap holds configuration data.
-type ConfigMap struct {
-	// An opaque identifier that is unique across all types.
-	ID ReferenceID `json:"id"`
-
-	// The underlying Kubernetes API version of this resource.
-	APIVersion string `json:"apiVersion"`
-
-	// The underlying Kubernetes API kind of this resource.
-	Kind string `json:"kind"`
-
-	// Metadata that is common to all Kubernetes API resources.
-	Metadata *ObjectMeta `json:"metadata"`
-
-	// An unstructured JSON representation of the underlying Kubernetes
-	// resource.
-	Unstructured []byte `json:"raw"`
-
-	// Events pertaining to this resource.
-	Events *EventConnection `json:"events"`
-
-	data map[string]string
-}
-
 // Data of this config map.
-func (cm *ConfigMap) Data(keys []string) map[string]string {
+func (cm ConfigMap) Data(keys []string) map[string]string {
 	if keys == nil || cm.data == nil {
 		return cm.data
 	}
@@ -207,13 +155,6 @@ func (cm *ConfigMap) Data(keys []string) map[string]string {
 	return out
 }
 
-// IsNode indicates that a ConfigMap satisfies the GraphQL Node interface.
-func (ConfigMap) IsNode() {}
-
-// IsKubernetesResource indicates that a ConfigMap satisfies the GraphQL
-// IsKubernetesResource interface.
-func (ConfigMap) IsKubernetesResource() {}
-
 // GetSecret from the suppled Kubernetes Secret
 func GetSecret(s *corev1.Secret) Secret {
 	out := Secret{
@@ -223,10 +164,12 @@ func GetSecret(s *corev1.Secret) Secret {
 			Namespace:  s.GetNamespace(),
 			Name:       s.GetName(),
 		},
-		APIVersion:   corev1.SchemeGroupVersion.String(),
-		Kind:         "Secret",
-		Metadata:     GetObjectMeta(s),
-		Unstructured: unstruct(s),
+		APIVersion: corev1.SchemeGroupVersion.String(),
+		Kind:       "Secret",
+		Metadata:   GetObjectMeta(s),
+		PavedAccess: PavedAccess{
+			Paved: paveObject(s),
+		},
 	}
 
 	if s.Data != nil {
@@ -237,7 +180,7 @@ func GetSecret(s *corev1.Secret) Secret {
 	}
 
 	if s.Type != "" {
-		out.Type = pointer.StringPtr(string(s.Type))
+		out.Type = ptr.To(string(s.Type))
 	}
 
 	return out
@@ -252,11 +195,13 @@ func GetConfigMap(cm *corev1.ConfigMap) ConfigMap {
 			Namespace:  cm.GetNamespace(),
 			Name:       cm.GetName(),
 		},
-		APIVersion:   corev1.SchemeGroupVersion.String(),
-		Kind:         "ConfigMap",
-		Metadata:     GetObjectMeta(cm),
-		Unstructured: unstruct(cm),
-		data:         cm.Data,
+		APIVersion: corev1.SchemeGroupVersion.String(),
+		Kind:       "ConfigMap",
+		Metadata:   GetObjectMeta(cm),
+		PavedAccess: PavedAccess{
+			Paved: paveObject(cm),
+		},
+		data: cm.Data,
 	}
 }
 
@@ -346,25 +291,27 @@ func GetCustomResourceDefinitionStatus(in kextv1.CustomResourceDefinitionStatus)
 }
 
 // GetCustomResourceDefinition from the suppled Kubernetes CRD.
-func GetCustomResourceDefinition(crd *kextv1.CustomResourceDefinition) CustomResourceDefinition {
+func GetCustomResourceDefinition(crd *unstructured.CustomResourceDefinition) CustomResourceDefinition {
 	return CustomResourceDefinition{
 		ID: ReferenceID{
-			APIVersion: crd.APIVersion,
-			Kind:       crd.Kind,
+			APIVersion: crd.GetAPIVersion(),
+			Kind:       crd.GetKind(),
 			Name:       crd.GetName(),
 		},
 
-		APIVersion: crd.APIVersion,
-		Kind:       crd.Kind,
+		APIVersion: crd.GetAPIVersion(),
+		Kind:       crd.GetKind(),
 		Metadata:   GetObjectMeta(crd),
-		Spec: &CustomResourceDefinitionSpec{
-			Group:    crd.Spec.Group,
-			Names:    GetCustomResourceDefinitionNames(crd.Spec.Names),
-			Scope:    GetResourceScope(crd.Spec.Scope),
-			Versions: GetCustomResourceDefinitionVersions(crd.Spec.Versions),
+		Spec: CustomResourceDefinitionSpec{
+			Group:    crd.GetSpecGroup(),
+			Names:    *GetCustomResourceDefinitionNames(crd.GetSpecNames()),
+			Scope:    GetResourceScope(crd.GetSpecScope()),
+			Versions: GetCustomResourceDefinitionVersions(crd.GetSpecVersions()),
 		},
-		Status:       GetCustomResourceDefinitionStatus(crd.Status),
-		Unstructured: unstruct(crd),
+		Status: GetCustomResourceDefinitionStatus(crd.GetStatus()),
+		PavedAccess: PavedAccess{
+			Paved: fieldpath.Pave(crd.Object),
+		},
 	}
 }
 
@@ -438,7 +385,9 @@ func GetKubernetesResource(u *kunstructured.Unstructured) (KubernetesResource, e
 		return GetComposition(cmp), nil
 
 	case u.GroupVersionKind() == schema.GroupVersionKind{Group: kextv1.GroupName, Version: "v1", Kind: "CustomResourceDefinition"}:
-		crd := &kextv1.CustomResourceDefinition{}
+		crd := &unstructured.CustomResourceDefinition{}
+		crd.SetAPIVersion("apiextensions.k8s.io/v1")
+		crd.SetKind("CustomResourceDefinition")
 		if err := convert(u, crd); err != nil {
 			return nil, errors.Wrap(err, "cannot convert custom resource definition")
 		}
@@ -460,5 +409,41 @@ func GetKubernetesResource(u *kunstructured.Unstructured) (KubernetesResource, e
 
 	default:
 		return GetGenericResource(u), nil
+	}
+}
+
+// GetObjectReference from the supplied corev1 ObjectReference
+func GetObjectReference(o *corev1.ObjectReference) *ObjectReference {
+
+	if o == nil {
+		return nil
+	}
+
+	ref := &ObjectReference{}
+
+	if o.Kind != "" {
+		ref.Kind = &o.Kind
+	}
+
+	if o.Namespace != "" {
+		ref.Namespace = &o.Namespace
+	}
+
+	if o.Name != "" {
+		ref.Name = &o.Name
+	}
+
+	return ref
+}
+
+// GetSecretReference from the supplied corev1 ObjectReference
+func GetSecretReference(u *xpv1.SecretReference) *SecretReference {
+	if u == nil {
+		return nil
+	}
+
+	return &SecretReference{
+		Name:      u.Name,
+		Namespace: u.Namespace,
 	}
 }

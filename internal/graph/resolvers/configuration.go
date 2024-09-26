@@ -18,13 +18,14 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/99designs/gqlgen/graphql"
-	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	extv1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 	pkgv1 "github.com/crossplane/crossplane/apis/pkg/v1"
 
@@ -42,7 +43,7 @@ type configuration struct {
 	clients ClientCache
 }
 
-func (r *configuration) Events(ctx context.Context, obj *model.Configuration) (*model.EventConnection, error) {
+func (r *configuration) Events(ctx context.Context, obj *model.Configuration) (model.EventConnection, error) {
 	e := &events{clients: r.clients}
 	return e.Resolve(ctx, &corev1.ObjectReference{
 		APIVersion: obj.APIVersion,
@@ -52,7 +53,7 @@ func (r *configuration) Events(ctx context.Context, obj *model.Configuration) (*
 	})
 }
 
-func (r *configuration) Revisions(ctx context.Context, obj *model.Configuration) (*model.ConfigurationRevisionConnection, error) {
+func (r *configuration) Revisions(ctx context.Context, obj *model.Configuration) (model.ConfigurationRevisionConnection, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -60,13 +61,13 @@ func (r *configuration) Revisions(ctx context.Context, obj *model.Configuration)
 	c, err := r.clients.Get(creds)
 	if err != nil {
 		graphql.AddError(ctx, errors.Wrap(err, errGetClient))
-		return nil, nil
+		return model.ConfigurationRevisionConnection{}, nil
 	}
 
 	in := &pkgv1.ConfigurationRevisionList{}
 	if err := c.List(ctx, in); err != nil {
 		graphql.AddError(ctx, errors.Wrap(err, errListConfigRevs))
-		return nil, nil
+		return model.ConfigurationRevisionConnection{}, nil
 	}
 
 	out := &model.ConfigurationRevisionConnection{
@@ -88,7 +89,7 @@ func (r *configuration) Revisions(ctx context.Context, obj *model.Configuration)
 	}
 
 	sort.Stable(out)
-	return out, nil
+	return *out, nil
 }
 
 func (r *configuration) ActiveRevision(ctx context.Context, obj *model.Configuration) (*model.ConfigurationRevision, error) {
@@ -134,7 +135,7 @@ type configurationRevision struct {
 	clients ClientCache
 }
 
-func (r *configurationRevision) Events(ctx context.Context, obj *model.ConfigurationRevision) (*model.EventConnection, error) {
+func (r *configurationRevision) Events(ctx context.Context, obj *model.ConfigurationRevision) (model.EventConnection, error) {
 	e := &events{clients: r.clients}
 	return e.Resolve(ctx, &corev1.ObjectReference{
 		APIVersion: obj.APIVersion,
@@ -148,7 +149,7 @@ type configurationRevisionStatus struct {
 	clients ClientCache
 }
 
-func (r *configurationRevisionStatus) Objects(ctx context.Context, obj *model.ConfigurationRevisionStatus) (*model.KubernetesResourceConnection, error) {
+func (r *configurationRevisionStatus) Objects(ctx context.Context, obj *model.ConfigurationRevisionStatus) (model.KubernetesResourceConnection, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -156,13 +157,18 @@ func (r *configurationRevisionStatus) Objects(ctx context.Context, obj *model.Co
 	c, err := r.clients.Get(creds)
 	if err != nil {
 		graphql.AddError(ctx, errors.Wrap(err, errGetClient))
-		return nil, nil
+		return model.KubernetesResourceConnection{}, nil
 	}
 
 	out := &model.KubernetesResourceConnection{
 		Nodes: make([]model.KubernetesResource, 0, len(obj.ObjectRefs)),
 	}
 
+	// Collect all concurrently.
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
 	for _, ref := range obj.ObjectRefs {
 		// Crossplane lints configuration packages to ensure they only contain XRDs and Compositions
 		// but this isn't enforced at the API level. We filter out anything that
@@ -171,27 +177,36 @@ func (r *configurationRevisionStatus) Objects(ctx context.Context, obj *model.Co
 			continue
 		}
 
-		switch ref.Kind {
-		case extv1.CompositeResourceDefinitionKind:
-			xrd := &extv1.CompositeResourceDefinition{}
-			if err := c.Get(ctx, types.NamespacedName{Name: ref.Name}, xrd); err != nil {
-				graphql.AddError(ctx, errors.Wrap(err, errGetXRD))
-				continue
+		ref := ref // So we don't take the address of a range variable.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var kr model.KubernetesResource
+			switch ref.Kind {
+			case extv1.CompositeResourceDefinitionKind:
+				xrd := &extv1.CompositeResourceDefinition{}
+				if err := c.Get(ctx, types.NamespacedName{Name: ref.Name}, xrd); err != nil {
+					graphql.AddError(ctx, errors.Wrap(err, errGetXRD))
+					return
+				}
+				kr = model.GetCompositeResourceDefinition(xrd)
+			case extv1.CompositionKind:
+				cmp := &extv1.Composition{}
+				if err := c.Get(ctx, types.NamespacedName{Name: ref.Name}, cmp); err != nil {
+					graphql.AddError(ctx, errors.Wrap(err, errGetComp))
+					return
+				}
+				kr = model.GetComposition(cmp)
+			default:
+				return
 			}
-
-			out.Nodes = append(out.Nodes, model.GetCompositeResourceDefinition(xrd))
+			mu.Lock()
+			defer mu.Unlock()
+			out.Nodes = append(out.Nodes, kr)
 			out.TotalCount++
-		case extv1.CompositionKind:
-			cmp := &extv1.Composition{}
-			if err := c.Get(ctx, types.NamespacedName{Name: ref.Name}, cmp); err != nil {
-				graphql.AddError(ctx, errors.Wrap(err, errGetComp))
-				continue
-			}
-
-			out.Nodes = append(out.Nodes, model.GetComposition(cmp))
-			out.TotalCount++
-		}
+		}()
 	}
+	wg.Wait()
 
-	return out, nil
+	return *out, nil
 }

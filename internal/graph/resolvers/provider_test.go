@@ -21,7 +21,6 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/pkg/errors"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	kextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -30,6 +29,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/pkg/fieldpath"
 	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
 	pkgv1 "github.com/crossplane/crossplane/apis/pkg/v1"
@@ -38,6 +39,7 @@ import (
 	"github.com/upbound/xgql/internal/clients"
 	"github.com/upbound/xgql/internal/graph/generated"
 	"github.com/upbound/xgql/internal/graph/model"
+	xunstructured "github.com/upbound/xgql/internal/unstructured"
 )
 
 var (
@@ -57,7 +59,7 @@ func TestProviderRevisions(t *testing.T) {
 			Name:            "coolconfig",
 			OwnerReferences: []metav1.OwnerReference{meta.AsController(&xpv1.TypedReference{UID: types.UID(uid)})},
 		},
-		Spec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionActive},
+		Spec: pkgv1.ProviderRevisionSpec{PackageRevisionSpec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionActive}},
 	}
 	gactive := model.GetProviderRevision(&active)
 
@@ -67,7 +69,7 @@ func TestProviderRevisions(t *testing.T) {
 			Name:            "coolconfig",
 			OwnerReferences: []metav1.OwnerReference{meta.AsController(&xpv1.TypedReference{UID: types.UID(uid)})},
 		},
-		Spec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionInactive},
+		Spec: pkgv1.ProviderRevisionSpec{PackageRevisionSpec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionInactive}},
 	}
 	ginactive := model.GetProviderRevision(&inactive)
 
@@ -79,7 +81,7 @@ func TestProviderRevisions(t *testing.T) {
 		obj *model.Provider
 	}
 	type want struct {
-		pc   *model.ProviderRevisionConnection
+		pc   model.ProviderRevisionConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -100,7 +102,7 @@ func TestProviderRevisions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -116,7 +118,7 @@ func TestProviderRevisions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListProviderRevs).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListProviderRevs)),
 				},
 			},
 		},
@@ -135,11 +137,11 @@ func TestProviderRevisions(t *testing.T) {
 			args: args{
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 				obj: &model.Provider{
-					Metadata: &model.ObjectMeta{UID: uid},
+					Metadata: model.ObjectMeta{UID: uid},
 				},
 			},
 			want: want{
-				pc: &model.ProviderRevisionConnection{
+				pc: model.ProviderRevisionConnection{
 					Nodes:      []model.ProviderRevision{gactive, ginactive},
 					TotalCount: 2,
 				},
@@ -162,7 +164,7 @@ func TestProviderRevisions(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.Revisions(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.pc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.pc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.Revisions(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -180,7 +182,7 @@ func TestProviderActiveRevision(t *testing.T) {
 			Name:            "coolconfig",
 			OwnerReferences: []metav1.OwnerReference{meta.AsController(&xpv1.TypedReference{UID: types.UID(uid)})},
 		},
-		Spec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionActive},
+		Spec: pkgv1.ProviderRevisionSpec{PackageRevisionSpec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionActive}},
 	}
 	gactive := model.GetProviderRevision(&active)
 
@@ -190,13 +192,13 @@ func TestProviderActiveRevision(t *testing.T) {
 			Name:            "coolconfig",
 			OwnerReferences: []metav1.OwnerReference{meta.AsController(&xpv1.TypedReference{UID: types.UID(uid)})},
 		},
-		Spec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionInactive},
+		Spec: pkgv1.ProviderRevisionSpec{PackageRevisionSpec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionInactive}},
 	}
 
 	// An active ProviderRevision which we do not control.
 	otherActive := pkgv1.ProviderRevision{
 		ObjectMeta: metav1.ObjectMeta{Name: "not-ours"},
-		Spec:       pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionActive},
+		Spec:       pkgv1.ProviderRevisionSpec{PackageRevisionSpec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionActive}},
 	}
 
 	type args struct {
@@ -225,7 +227,7 @@ func TestProviderActiveRevision(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -241,7 +243,7 @@ func TestProviderActiveRevision(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListProviderRevs).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListProviderRevs)),
 				},
 			},
 		},
@@ -260,7 +262,7 @@ func TestProviderActiveRevision(t *testing.T) {
 			args: args{
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 				obj: &model.Provider{
-					Metadata: &model.ObjectMeta{UID: uid},
+					Metadata: model.ObjectMeta{UID: uid},
 				},
 			},
 			want: want{
@@ -282,7 +284,7 @@ func TestProviderActiveRevision(t *testing.T) {
 			args: args{
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 				obj: &model.Provider{
-					Metadata: &model.ObjectMeta{UID: uid},
+					Metadata: model.ObjectMeta{UID: uid},
 				},
 			},
 			want: want{
@@ -306,7 +308,7 @@ func TestProviderActiveRevision(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.ActiveRevision(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.pr, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.pr, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.ActiveRevision(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -316,14 +318,14 @@ func TestProviderActiveRevision(t *testing.T) {
 func TestProviderRevisionStatusObjects(t *testing.T) {
 	errBoom := errors.New("boom")
 
-	gcrd := model.GetCustomResourceDefinition(&kextv1.CustomResourceDefinition{})
+	gcrd := model.GetCustomResourceDefinition(&xunstructured.CustomResourceDefinition{})
 
 	type args struct {
 		ctx context.Context
 		obj *model.ProviderRevisionStatus
 	}
 	type want struct {
-		krc  *model.KubernetesResourceConnection
+		krc  model.KubernetesResourceConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -344,7 +346,7 @@ func TestProviderRevisionStatusObjects(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -368,7 +370,7 @@ func TestProviderRevisionStatusObjects(t *testing.T) {
 				},
 			},
 			want: want{
-				krc: &model.KubernetesResourceConnection{
+				krc: model.KubernetesResourceConnection{
 					Nodes:      []model.KubernetesResource{},
 					TotalCount: 0,
 				},
@@ -393,12 +395,12 @@ func TestProviderRevisionStatusObjects(t *testing.T) {
 				},
 			},
 			want: want{
-				krc: &model.KubernetesResourceConnection{
+				krc: model.KubernetesResourceConnection{
 					Nodes:      []model.KubernetesResource{},
 					TotalCount: 0,
 				},
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetCRD).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetCRD)),
 				},
 			},
 		},
@@ -421,7 +423,7 @@ func TestProviderRevisionStatusObjects(t *testing.T) {
 				},
 			},
 			want: want{
-				krc: &model.KubernetesResourceConnection{
+				krc: model.KubernetesResourceConnection{
 					Nodes:      []model.KubernetesResource{gcrd},
 					TotalCount: 1,
 				},
@@ -444,7 +446,10 @@ func TestProviderRevisionStatusObjects(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ns.Objects(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.krc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.krc, got,
+				cmpopts.IgnoreUnexported(model.ObjectMeta{}),
+				cmpopts.IgnoreFields(model.CustomResourceDefinition{}, "PavedAccess"),
+			); diff != "" {
 				t.Errorf("\n%s\ns.Objects(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})

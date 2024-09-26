@@ -19,19 +19,19 @@ import (
 	"testing"
 
 	"github.com/99designs/gqlgen/graphql"
-	"github.com/pkg/errors"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	corev1 "k8s.io/api/core/v1"
-	kextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
+	"github.com/crossplane/crossplane-runtime/pkg/fieldpath"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
 	extv1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 	pkgv1 "github.com/crossplane/crossplane/apis/pkg/v1"
@@ -40,9 +40,199 @@ import (
 	"github.com/upbound/xgql/internal/clients"
 	"github.com/upbound/xgql/internal/graph/generated"
 	"github.com/upbound/xgql/internal/graph/model"
+	xunstructured "github.com/upbound/xgql/internal/unstructured"
 )
 
 var _ generated.QueryResolver = &query{}
+
+func TestCrossplaneResourceTree(t *testing.T) {
+	errBoom := errors.New("boom")
+
+	type args struct {
+		ctx context.Context
+		id  model.ReferenceID
+	}
+	type want struct {
+		kr   model.CrossplaneResourceTreeConnection
+		err  error
+		errs gqlerror.List
+	}
+
+	namespace := "default"
+	deletionPolicyDelete := model.DeletionPolicyDelete
+
+	cases := map[string]struct {
+		reason  string
+		clients ClientCache
+		args    args
+		want    want
+	}{
+		"GetKubernetesResourceError": {
+			reason: "If we can't get a client we should add the error to the GraphQL context and return early.",
+			clients: ClientCacheFn(func(_ auth.Credentials, _ ...clients.GetOption) (client.Client, error) {
+				return &test.MockClient{}, errBoom
+			}),
+			args: args{
+				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
+			},
+			want: want{
+				errs: gqlerror.List{
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
+				},
+			},
+		},
+		"SuccessWithNoComposite": {
+			reason: "It is a successful call",
+			clients: ClientCacheFn(func(_ auth.Credentials, _ ...clients.GetOption) (client.Client, error) {
+				return &test.MockClient{
+					MockGet: func(_ context.Context, key client.ObjectKey, obj client.Object) error {
+						switch key.Name {
+						case "root":
+							u := *obj.(*unstructured.Unstructured)
+							u.SetNamespace(namespace)
+							fieldpath.Pave(u.Object).SetValue("spec.compositionRef", &corev1.ObjectReference{
+								Name: "coolcomposition",
+							})
+						default:
+							t.Fatalf("unknown get with name: %s", key.Name)
+						}
+						return nil
+					},
+				}, nil
+			}),
+			args: args{
+				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
+				id:  model.ReferenceID{Name: "root"},
+			},
+			want: want{
+				kr: model.CrossplaneResourceTreeConnection{TotalCount: 1, Nodes: []model.CrossplaneResourceTreeNode{
+					{
+						Resource: model.CompositeResourceClaim{
+							ID:       model.ReferenceID{Namespace: namespace},
+							Metadata: model.ObjectMeta{Namespace: &namespace},
+							Spec:     model.CompositeResourceClaimSpec{CompositionReference: &corev1.ObjectReference{Name: "coolcomposition"}},
+						},
+					},
+				}},
+			},
+		},
+		"Success": {
+			reason: "It is a successful call",
+			clients: ClientCacheFn(func(_ auth.Credentials, _ ...clients.GetOption) (client.Client, error) {
+				return &test.MockClient{
+					MockGet: func(_ context.Context, key client.ObjectKey, obj client.Object) error {
+						u := *obj.(*unstructured.Unstructured)
+						u.SetName(key.Name)
+
+						switch key.Name {
+						case "root":
+							u.SetNamespace(namespace)
+							fieldpath.Pave(u.Object).SetValue("spec.resourceRef", &corev1.ObjectReference{Name: "composite"})
+						case "composite":
+							fieldpath.Pave(u.Object).SetValue("spec.resourceRefs", []corev1.ObjectReference{{Name: "managed1"}, {Name: "child-composite"}})
+						case "child-composite":
+							fieldpath.Pave(u.Object).SetValue("spec.resourceRefs", []corev1.ObjectReference{{Name: "managed2"}, {Name: "provider-config"}})
+						case "managed1":
+							fallthrough
+						case "managed2":
+							fieldpath.Pave(u.Object).SetValue("spec.providerConfigRef.name", "")
+						case "provider-config":
+							u.SetKind("ProviderConfig")
+						default:
+							t.Fatalf("unknown get with name: %s", key.Name)
+						}
+						return nil
+					},
+				}, nil
+			}),
+			args: args{
+				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
+				id:  model.ReferenceID{Name: "root"},
+			},
+			want: want{
+				kr: model.CrossplaneResourceTreeConnection{TotalCount: 6, Nodes: []model.CrossplaneResourceTreeNode{
+					{
+						Resource: model.CompositeResourceClaim{
+							ID:       model.ReferenceID{Namespace: namespace, Name: "root"},
+							Metadata: model.ObjectMeta{Namespace: &namespace, Name: "root"},
+							Spec:     model.CompositeResourceClaimSpec{ResourceReference: &corev1.ObjectReference{Name: "composite"}},
+						},
+					},
+					{
+						ParentID: &model.ReferenceID{Namespace: "default", Name: "root"},
+						Resource: model.CompositeResource{
+							ID:       model.ReferenceID{Name: "composite"},
+							Metadata: model.ObjectMeta{Name: "composite"},
+							Spec:     model.CompositeResourceSpec{ResourceReferences: []corev1.ObjectReference{{Name: "managed1"}, {Name: "child-composite"}}},
+						},
+					},
+					{
+						ParentID: &model.ReferenceID{Name: "composite"},
+						Resource: model.CompositeResource{
+							ID:       model.ReferenceID{Name: "child-composite"},
+							Metadata: model.ObjectMeta{Name: "child-composite"},
+							Spec:     model.CompositeResourceSpec{ResourceReferences: []corev1.ObjectReference{{Name: "managed2"}, {Name: "provider-config"}}},
+						},
+					},
+					{
+						ParentID: &model.ReferenceID{Name: "child-composite"},
+						Resource: model.ProviderConfig{
+							ID:       model.ReferenceID{Kind: "ProviderConfig", Name: "provider-config"},
+							Kind:     "ProviderConfig",
+							Metadata: model.ObjectMeta{Name: "provider-config"},
+						},
+					},
+					{
+						ParentID: &model.ReferenceID{Name: "child-composite"},
+						Resource: model.ManagedResource{
+							ID:       model.ReferenceID{Name: "managed2"},
+							Metadata: model.ObjectMeta{Name: "managed2"},
+							Spec:     model.ManagedResourceSpec{ProviderConfigRef: &model.ProviderConfigReference{}, DeletionPolicy: &deletionPolicyDelete},
+						},
+					},
+					{
+						ParentID: &model.ReferenceID{Name: "composite"},
+						Resource: model.ManagedResource{
+							ID:       model.ReferenceID{Name: "managed1"},
+							Metadata: model.ObjectMeta{Name: "managed1"},
+							Spec:     model.ManagedResourceSpec{ProviderConfigRef: &model.ProviderConfigReference{}, DeletionPolicy: &deletionPolicyDelete},
+						},
+					},
+				}},
+			},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			q := &query{clients: tc.clients}
+
+			// Our GraphQL resolvers never return errors. We instead add an
+			// error to the GraphQL context and return early.
+			got, err := q.CrossplaneResourceTree(tc.args.ctx, tc.args.id)
+			errs := graphql.GetErrors(tc.args.ctx)
+
+			if diff := cmp.Diff(tc.want.err, err, test.EquateErrors()); diff != "" {
+				t.Errorf("\n%s\ns.KubernetesResource(...): -want error, +got error:\n%s\n", tc.reason, diff)
+			}
+			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
+				t.Errorf("\n%s\ns.KubernetesResource(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
+			}
+
+			diffOptions := []cmp.Option{
+				cmpopts.IgnoreFields(model.CompositeResourceClaim{}, "PavedAccess"),
+				cmpopts.IgnoreFields(model.CompositeResource{}, "PavedAccess"),
+				cmpopts.IgnoreFields(model.ManagedResource{}, "PavedAccess"),
+				cmpopts.IgnoreFields(model.ProviderConfig{}, "PavedAccess"),
+				cmpopts.IgnoreUnexported(model.ObjectMeta{}),
+			}
+
+			if diff := cmp.Diff(tc.want.kr, got, diffOptions...); diff != "" {
+				t.Errorf("\n%s\ns.KubernetesResource(...): -want, +got:\n%s\n", tc.reason, diff)
+			}
+		})
+	}
+}
 
 func TestQueryKubernetesResource(t *testing.T) {
 	errBoom := errors.New("boom")
@@ -75,7 +265,7 @@ func TestQueryKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -91,12 +281,12 @@ func TestQueryKubernetesResource(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetResource).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetResource)),
 				},
 			},
 		},
 		"Success": {
-			reason: "If we can get and model the resource  we should return it.",
+			reason: "If we can get and model the resource we should return it.",
 			clients: ClientCacheFn(func(_ auth.Credentials, _ ...clients.GetOption) (client.Client, error) {
 				return &test.MockClient{
 					MockGet: test.NewMockGetFn(nil),
@@ -126,7 +316,7 @@ func TestQueryKubernetesResource(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ns.KubernetesResource(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.kr, got, cmpopts.IgnoreFields(model.GenericResource{}, "Unstructured"), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.kr, got, cmpopts.IgnoreFields(model.GenericResource{}, "PavedAccess"), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\ns.KubernetesResource(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -158,7 +348,7 @@ func TestQueryKubernetesResources(t *testing.T) {
 		namespace  *string
 	}
 	type want struct {
-		krc  *model.KubernetesResourceConnection
+		krc  model.KubernetesResourceConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -179,7 +369,7 @@ func TestQueryKubernetesResources(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -195,7 +385,7 @@ func TestQueryKubernetesResources(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListResources).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListResources)),
 				},
 			},
 		},
@@ -224,7 +414,7 @@ func TestQueryKubernetesResources(t *testing.T) {
 				kind:       kind,
 			},
 			want: want{
-				krc: &model.KubernetesResourceConnection{
+				krc: model.KubernetesResourceConnection{
 					Nodes:      []model.KubernetesResource{gkr},
 					TotalCount: 1,
 				},
@@ -256,7 +446,7 @@ func TestQueryKubernetesResources(t *testing.T) {
 				listKind:   &listKind,
 			},
 			want: want{
-				krc: &model.KubernetesResourceConnection{
+				krc: model.KubernetesResourceConnection{
 					Nodes:      []model.KubernetesResource{gkr},
 					TotalCount: 1,
 				},
@@ -265,12 +455,12 @@ func TestQueryKubernetesResources(t *testing.T) {
 		"WithNamespace": {
 			reason: "We should successfully list, model, and return resources from within a specific namespace.",
 			clients: ClientCacheFn(func(_ auth.Credentials, o ...clients.GetOption) (client.Client, error) {
-				if len(o) != 1 {
-					t.Errorf("Expected 1 GetOption, got %d", len(o))
-				}
 				return &test.MockClient{
-					MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
-						u := *obj.(*unstructured.UnstructuredList)
+					MockList: func(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
+						if len(opts) != 1 {
+							t.Errorf("Expected 1 ListOption, got %d", len(opts))
+						}
+						u := *list.(*unstructured.UnstructuredList)
 
 						// Ensure we're being asked to list the expected GVK.
 						got := u.GetObjectKind().GroupVersionKind()
@@ -279,9 +469,10 @@ func TestQueryKubernetesResources(t *testing.T) {
 							t.Errorf("-want GVK, +got GVK:\n%s", diff)
 						}
 
-						*obj.(*unstructured.UnstructuredList) = unstructured.UnstructuredList{Items: []unstructured.Unstructured{kr}}
+						*list.(*unstructured.UnstructuredList) = unstructured.UnstructuredList{Items: []unstructured.Unstructured{kr}}
 						return nil
-					}),
+
+					},
 				}, nil
 			}),
 			args: args{
@@ -291,7 +482,7 @@ func TestQueryKubernetesResources(t *testing.T) {
 				namespace:  &ns,
 			},
 			want: want{
-				krc: &model.KubernetesResourceConnection{
+				krc: model.KubernetesResourceConnection{
 					Nodes:      []model.KubernetesResource{gkr},
 					TotalCount: 1,
 				},
@@ -314,7 +505,7 @@ func TestQueryKubernetesResources(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.DefinedCompositeResourceClaims(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.krc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.krc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.DefinedCompositeResourceClaims(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -353,7 +544,7 @@ func TestQuerySecret(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -369,7 +560,7 @@ func TestQuerySecret(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetSecret).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetSecret)),
 				},
 			},
 		},
@@ -404,7 +595,7 @@ func TestQuerySecret(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ns.Secret(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.sec, got, cmp.AllowUnexported(model.Secret{}), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.sec, got, cmp.AllowUnexported(model.Secret{}), cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\ns.Secret(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -443,7 +634,7 @@ func TestQueryConfigMap(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -459,7 +650,7 @@ func TestQueryConfigMap(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetConfigMap).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetConfigMap)),
 				},
 			},
 		},
@@ -494,7 +685,7 @@ func TestQueryConfigMap(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ns.ConfigMap(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.cm, got, cmp.AllowUnexported(model.ConfigMap{}), cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.cm, got, cmp.AllowUnexported(model.ConfigMap{}), cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\ns.ConfigMap(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -511,7 +702,7 @@ func TestQueryProviders(t *testing.T) {
 		ctx context.Context
 	}
 	type want struct {
-		pc   *model.ProviderConnection
+		pc   model.ProviderConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -532,7 +723,7 @@ func TestQueryProviders(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -548,7 +739,7 @@ func TestQueryProviders(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListProviders).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListProviders)),
 				},
 			},
 		},
@@ -566,7 +757,7 @@ func TestQueryProviders(t *testing.T) {
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 			},
 			want: want{
-				pc: &model.ProviderConnection{
+				pc: model.ProviderConnection{
 					Nodes:      []model.Provider{gp},
 					TotalCount: 1,
 				},
@@ -589,7 +780,7 @@ func TestQueryProviders(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.Providers(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.pc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.pc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.Providers(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -615,7 +806,7 @@ func TestQueryProviderRevisions(t *testing.T) {
 				Name:       id.Name,
 			}},
 		},
-		Spec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionActive},
+		Spec: pkgv1.ProviderRevisionSpec{PackageRevisionSpec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionActive}},
 	}
 	gactive := model.GetProviderRevision(&active)
 
@@ -629,7 +820,7 @@ func TestQueryProviderRevisions(t *testing.T) {
 				Name:       id.Name,
 			}},
 		},
-		Spec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionInactive},
+		Spec: pkgv1.ProviderRevisionSpec{PackageRevisionSpec: pkgv1.PackageRevisionSpec{DesiredState: pkgv1.PackageRevisionInactive}},
 	}
 	ginactive := model.GetProviderRevision(&inactive)
 
@@ -652,7 +843,7 @@ func TestQueryProviderRevisions(t *testing.T) {
 		active *bool
 	}
 	type want struct {
-		pc   *model.ProviderRevisionConnection
+		pc   model.ProviderRevisionConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -673,7 +864,7 @@ func TestQueryProviderRevisions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -689,7 +880,7 @@ func TestQueryProviderRevisions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListProviderRevs).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListProviderRevs)),
 				},
 			},
 		},
@@ -709,7 +900,7 @@ func TestQueryProviderRevisions(t *testing.T) {
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 			},
 			want: want{
-				pc: &model.ProviderRevisionConnection{
+				pc: model.ProviderRevisionConnection{
 					Nodes:      []model.ProviderRevision{gactive, ginactive, gother},
 					TotalCount: 3,
 				},
@@ -732,7 +923,7 @@ func TestQueryProviderRevisions(t *testing.T) {
 				id:  &id,
 			},
 			want: want{
-				pc: &model.ProviderRevisionConnection{
+				pc: model.ProviderRevisionConnection{
 					Nodes:      []model.ProviderRevision{gactive, ginactive},
 					TotalCount: 2,
 				},
@@ -752,10 +943,10 @@ func TestQueryProviderRevisions(t *testing.T) {
 			}),
 			args: args{
 				ctx:    graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
-				active: pointer.BoolPtr(true),
+				active: ptr.To(true),
 			},
 			want: want{
-				pc: &model.ProviderRevisionConnection{
+				pc: model.ProviderRevisionConnection{
 					Nodes:      []model.ProviderRevision{gactive},
 					TotalCount: 1,
 				},
@@ -778,7 +969,7 @@ func TestQueryProviderRevisions(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.Revisions(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.pc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.pc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.Revisions(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -794,42 +985,44 @@ func TestQueryCustomResourceDefinitions(t *testing.T) {
 		Name:       "example",
 	}
 
-	owned := kextv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{
-		Name: "coolconfig",
-		OwnerReferences: []metav1.OwnerReference{
-			// Some spurious owner references that we should ignore.
-			{
-				APIVersion: "wat",
-			},
-			{
-				APIVersion: id.APIVersion,
-				Kind:       "wat",
-			},
-			{
-				APIVersion: id.APIVersion,
-				Kind:       id.Kind,
-				Name:       "wat",
-			},
-			// The reference that indicates this XRD is owned by our desired
-			// ConfigurationRevision (or a ConfigurationRevision generally).
-			{
-				APIVersion: id.APIVersion,
-				Kind:       id.Kind,
-				Name:       id.Name,
-			},
+	owned := xunstructured.NewCRD()
+	owned.SetName("coolconfig")
+	owned.SetOwnerReferences([]metav1.OwnerReference{
+		// Some spurious owner references that we should ignore.
+		{
+			APIVersion: "wat",
 		},
-	}}
-	gowned := model.GetCustomResourceDefinition(&owned)
+		{
+			APIVersion: id.APIVersion,
+			Kind:       "wat",
+		},
+		{
+			APIVersion: id.APIVersion,
+			Kind:       id.Kind,
+			Name:       "wat",
+		},
+		// The reference that indicates this XRD is owned by our desired
+		// ConfigurationRevision (or a ConfigurationRevision generally).
+		{
+			APIVersion: id.APIVersion,
+			Kind:       id.Kind,
+			Name:       id.Name,
+		},
+	})
 
-	dangler := kextv1.CustomResourceDefinition{ObjectMeta: metav1.ObjectMeta{Name: "coolconfig"}}
-	gdangler := model.GetCustomResourceDefinition(&dangler)
+	gowned := model.GetCustomResourceDefinition(owned)
+
+	dangler := xunstructured.NewCRD()
+	dangler.SetName("coolconfig")
+
+	gdangler := model.GetCustomResourceDefinition(dangler)
 
 	type args struct {
 		ctx      context.Context
 		revision *model.ReferenceID
 	}
 	type want struct {
-		xrdc *model.CustomResourceDefinitionConnection
+		xrdc model.CustomResourceDefinitionConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -850,7 +1043,7 @@ func TestQueryCustomResourceDefinitions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -866,7 +1059,7 @@ func TestQueryCustomResourceDefinitions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListConfigs).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListConfigs)),
 				},
 			},
 		},
@@ -875,10 +1068,10 @@ func TestQueryCustomResourceDefinitions(t *testing.T) {
 			clients: ClientCacheFn(func(_ auth.Credentials, _ ...clients.GetOption) (client.Client, error) {
 				return &test.MockClient{
 					MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
-						*obj.(*kextv1.CustomResourceDefinitionList) = kextv1.CustomResourceDefinitionList{
-							Items: []kextv1.CustomResourceDefinition{
-								dangler,
-								owned,
+						*obj.(*unstructured.UnstructuredList) = unstructured.UnstructuredList{
+							Items: []unstructured.Unstructured{
+								dangler.Unstructured,
+								owned.Unstructured,
 							},
 						}
 						return nil
@@ -889,7 +1082,7 @@ func TestQueryCustomResourceDefinitions(t *testing.T) {
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 			},
 			want: want{
-				xrdc: &model.CustomResourceDefinitionConnection{
+				xrdc: model.CustomResourceDefinitionConnection{
 					Nodes: []model.CustomResourceDefinition{
 						gdangler,
 						gowned,
@@ -903,10 +1096,10 @@ func TestQueryCustomResourceDefinitions(t *testing.T) {
 			clients: ClientCacheFn(func(_ auth.Credentials, _ ...clients.GetOption) (client.Client, error) {
 				return &test.MockClient{
 					MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
-						*obj.(*kextv1.CustomResourceDefinitionList) = kextv1.CustomResourceDefinitionList{
-							Items: []kextv1.CustomResourceDefinition{
-								dangler,
-								owned,
+						*obj.(*unstructured.UnstructuredList) = unstructured.UnstructuredList{
+							Items: []unstructured.Unstructured{
+								dangler.Unstructured,
+								owned.Unstructured,
 							},
 						}
 						return nil
@@ -918,7 +1111,7 @@ func TestQueryCustomResourceDefinitions(t *testing.T) {
 				revision: &id,
 			},
 			want: want{
-				xrdc: &model.CustomResourceDefinitionConnection{
+				xrdc: model.CustomResourceDefinitionConnection{
 					Nodes: []model.CustomResourceDefinition{
 						gowned,
 					},
@@ -943,7 +1136,10 @@ func TestQueryCustomResourceDefinitions(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.Configurations(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.xrdc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.xrdc, got,
+				cmpopts.IgnoreUnexported(model.ObjectMeta{}),
+				cmpopts.IgnoreFields(model.CustomResourceDefinition{}, "PavedAccess"),
+			); diff != "" {
 				t.Errorf("\n%s\nq.Configurations(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -960,7 +1156,7 @@ func TestQueryConfigurations(t *testing.T) {
 		ctx context.Context
 	}
 	type want struct {
-		cc   *model.ConfigurationConnection
+		cc   model.ConfigurationConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -981,7 +1177,7 @@ func TestQueryConfigurations(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -997,7 +1193,7 @@ func TestQueryConfigurations(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListConfigs).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListConfigs)),
 				},
 			},
 		},
@@ -1015,7 +1211,7 @@ func TestQueryConfigurations(t *testing.T) {
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 			},
 			want: want{
-				cc: &model.ConfigurationConnection{
+				cc: model.ConfigurationConnection{
 					Nodes:      []model.Configuration{gc},
 					TotalCount: 1,
 				},
@@ -1038,7 +1234,7 @@ func TestQueryConfigurations(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.Configurations(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.cc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.cc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.Configurations(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -1101,7 +1297,7 @@ func TestQueryConfigurationRevisions(t *testing.T) {
 		active *bool
 	}
 	type want struct {
-		pc   *model.ConfigurationRevisionConnection
+		pc   model.ConfigurationRevisionConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -1122,7 +1318,7 @@ func TestQueryConfigurationRevisions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -1138,7 +1334,7 @@ func TestQueryConfigurationRevisions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListConfigRevs).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListConfigRevs)),
 				},
 			},
 		},
@@ -1158,7 +1354,7 @@ func TestQueryConfigurationRevisions(t *testing.T) {
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 			},
 			want: want{
-				pc: &model.ConfigurationRevisionConnection{
+				pc: model.ConfigurationRevisionConnection{
 					Nodes:      []model.ConfigurationRevision{gactive, ginactive, gother},
 					TotalCount: 3,
 				},
@@ -1181,7 +1377,7 @@ func TestQueryConfigurationRevisions(t *testing.T) {
 				id:  &id,
 			},
 			want: want{
-				pc: &model.ConfigurationRevisionConnection{
+				pc: model.ConfigurationRevisionConnection{
 					Nodes:      []model.ConfigurationRevision{gactive, ginactive},
 					TotalCount: 2,
 				},
@@ -1201,10 +1397,10 @@ func TestQueryConfigurationRevisions(t *testing.T) {
 			}),
 			args: args{
 				ctx:    graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
-				active: pointer.BoolPtr(true),
+				active: ptr.To(true),
 			},
 			want: want{
-				pc: &model.ConfigurationRevisionConnection{
+				pc: model.ConfigurationRevisionConnection{
 					Nodes:      []model.ConfigurationRevision{gactive},
 					TotalCount: 1,
 				},
@@ -1227,7 +1423,7 @@ func TestQueryConfigurationRevisions(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.Revisions(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.pc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.pc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.Revisions(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -1279,7 +1475,7 @@ func TestQueryCompositeResourceDefinitions(t *testing.T) {
 		dangling *bool
 	}
 	type want struct {
-		xrdc *model.CompositeResourceDefinitionConnection
+		xrdc model.CompositeResourceDefinitionConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -1300,7 +1496,7 @@ func TestQueryCompositeResourceDefinitions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -1316,7 +1512,7 @@ func TestQueryCompositeResourceDefinitions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListConfigs).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListConfigs)),
 				},
 			},
 		},
@@ -1339,7 +1535,7 @@ func TestQueryCompositeResourceDefinitions(t *testing.T) {
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 			},
 			want: want{
-				xrdc: &model.CompositeResourceDefinitionConnection{
+				xrdc: model.CompositeResourceDefinitionConnection{
 					Nodes: []model.CompositeResourceDefinition{
 						gdangler,
 						gowned,
@@ -1365,10 +1561,10 @@ func TestQueryCompositeResourceDefinitions(t *testing.T) {
 			}),
 			args: args{
 				ctx:      graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
-				dangling: pointer.BoolPtr(true),
+				dangling: ptr.To(true),
 			},
 			want: want{
-				xrdc: &model.CompositeResourceDefinitionConnection{
+				xrdc: model.CompositeResourceDefinitionConnection{
 					Nodes: []model.CompositeResourceDefinition{
 						gdangler,
 					},
@@ -1396,7 +1592,7 @@ func TestQueryCompositeResourceDefinitions(t *testing.T) {
 				revision: &id,
 			},
 			want: want{
-				xrdc: &model.CompositeResourceDefinitionConnection{
+				xrdc: model.CompositeResourceDefinitionConnection{
 					Nodes: []model.CompositeResourceDefinition{
 						gowned,
 					},
@@ -1421,7 +1617,7 @@ func TestQueryCompositeResourceDefinitions(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.Configurations(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.xrdc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.xrdc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.Configurations(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})
@@ -1474,7 +1670,7 @@ func TestQueryCompositions(t *testing.T) {
 		dangling *bool
 	}
 	type want struct {
-		cc   *model.CompositionConnection
+		cc   model.CompositionConnection
 		err  error
 		errs gqlerror.List
 	}
@@ -1495,7 +1691,7 @@ func TestQueryCompositions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
 				},
 			},
 		},
@@ -1511,7 +1707,7 @@ func TestQueryCompositions(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListConfigs).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListConfigs)),
 				},
 			},
 		},
@@ -1534,7 +1730,7 @@ func TestQueryCompositions(t *testing.T) {
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 			},
 			want: want{
-				cc: &model.CompositionConnection{
+				cc: model.CompositionConnection{
 					Nodes: []model.Composition{
 						gdangler,
 						gowned,
@@ -1560,10 +1756,10 @@ func TestQueryCompositions(t *testing.T) {
 			}),
 			args: args{
 				ctx:      graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
-				dangling: pointer.BoolPtr(true),
+				dangling: ptr.To(true),
 			},
 			want: want{
-				cc: &model.CompositionConnection{
+				cc: model.CompositionConnection{
 					Nodes: []model.Composition{
 						gdangler,
 					},
@@ -1591,7 +1787,7 @@ func TestQueryCompositions(t *testing.T) {
 				revision: &id,
 			},
 			want: want{
-				cc: &model.CompositionConnection{
+				cc: model.CompositionConnection{
 					Nodes: []model.Composition{
 						gowned,
 					},
@@ -1616,7 +1812,7 @@ func TestQueryCompositions(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\nq.Configurations(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.cc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.cc, got, cmpopts.IgnoreUnexported(model.ObjectMeta{}, fieldpath.Paved{})); diff != "" {
 				t.Errorf("\n%s\nq.Configurations(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})

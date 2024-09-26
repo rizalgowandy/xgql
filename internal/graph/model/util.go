@@ -15,23 +15,12 @@
 package model
 
 import (
-	"github.com/pkg/errors"
 	kunstructured "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/json"
-)
 
-// unstruct returns the supplied object as unstructured JSON bytes. It panics if
-// the object cannot be marshalled as JSON, which _should_ only happen if this
-// program is fundamentally broken - e.g. trying to use a weird runtime.Object.
-func unstruct(obj runtime.Object) []byte {
-	out, err := json.Marshal(obj)
-	if err != nil {
-		panic(err)
-	}
-	return out
-}
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
+)
 
 func convert(from *kunstructured.Unstructured, to runtime.Object) error {
 	c := runtime.DefaultUnstructuredConverter

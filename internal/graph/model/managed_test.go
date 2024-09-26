@@ -58,13 +58,13 @@ func TestGetManagedResource(t *testing.T) {
 				},
 				APIVersion: "example.org/v1",
 				Kind:       "ManagedResource",
-				Metadata: &ObjectMeta{
+				Metadata: ObjectMeta{
 					Name: "cool",
 				},
-				Spec: &ManagedResourceSpec{
-					ProviderConfigRef:                 &ProviderConfigReference{Name: "coolprov"},
-					DeletionPolicy:                    &orphan,
-					WritesConnectionSecretToReference: &xpv1.SecretReference{Name: "coolsecret"},
+				Spec: ManagedResourceSpec{
+					ProviderConfigRef:                &ProviderConfigReference{Name: "coolprov"},
+					DeletionPolicy:                   &orphan,
+					WriteConnectionSecretToReference: &xpv1.SecretReference{Name: "coolsecret"},
 				},
 				Status: &ManagedResourceStatus{
 					Conditions: []Condition{{}},
@@ -75,8 +75,8 @@ func TestGetManagedResource(t *testing.T) {
 			reason: "Absent optional fields should be absent in our model",
 			u:      &kunstructured.Unstructured{Object: make(map[string]interface{})},
 			want: ManagedResource{
-				Metadata: &ObjectMeta{},
-				Spec: &ManagedResourceSpec{
+				Metadata: ObjectMeta{},
+				Spec: ManagedResourceSpec{
 					// This is technically optional, but it's basically always
 					// set to 'delete' using CRD defaulting. We also default it
 					// to 'delete' in unstructured.Managed.
@@ -90,7 +90,7 @@ func TestGetManagedResource(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			got := GetManagedResource(tc.u)
 
-			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(ManagedResource{}, "Unstructured"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(ManagedResource{}, "PavedAccess"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\nGetManagedResource(...): -want, +got\n:%s", tc.reason, diff)
 			}
 		})

@@ -21,45 +21,51 @@ import (
 	"github.com/99designs/gqlgen/graphql"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/pkg/errors"
 	"github.com/vektah/gqlparser/v2/gqlerror"
 	kextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	kerrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	kunstructured "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/test"
 
 	"github.com/upbound/xgql/internal/auth"
 	"github.com/upbound/xgql/internal/clients"
 	"github.com/upbound/xgql/internal/graph/generated"
 	"github.com/upbound/xgql/internal/graph/model"
+	"github.com/upbound/xgql/internal/unstructured"
 )
 
 var _ generated.ProviderConfigResolver = &providerConfig{}
 
 func TestProviderConfigDefinition(t *testing.T) {
 	errBoom := errors.New("boom")
-
-	crd := kextv1.CustomResourceDefinition{
-		Spec: kextv1.CustomResourceDefinitionSpec{
-			Group: "example.org",
-			Names: kextv1.CustomResourceDefinitionNames{Kind: "Example"},
-		},
-	}
-	gcrd := model.GetCustomResourceDefinition(&crd)
-
-	otherGroup := kextv1.CustomResourceDefinition{
-		Spec: kextv1.CustomResourceDefinitionSpec{
-			Group: "example.net",
-			Names: kextv1.CustomResourceDefinitionNames{Kind: "Example"},
+	errNotFound := &kerrors.StatusError{
+		ErrStatus: metav1.Status{
+			Reason: metav1.StatusReasonNotFound,
 		},
 	}
 
-	otherKind := kextv1.CustomResourceDefinition{
-		Spec: kextv1.CustomResourceDefinitionSpec{
-			Group: "example.org",
-			Names: kextv1.CustomResourceDefinitionNames{Kind: "Illustration"},
-		},
-	}
+	crd := unstructured.NewCRD()
+	crd.SetSpecGroup("example.org")
+	crd.SetSpecNames(kextv1.CustomResourceDefinitionNames{Kind: "Example"})
+
+	crdDifferingPlural := unstructured.NewCRD()
+	crdDifferingPlural.SetSpecGroup("example.org")
+	crdDifferingPlural.SetSpecNames(kextv1.CustomResourceDefinitionNames{Kind: "Example", Plural: "Examplii"})
+
+	gcrd := model.GetCustomResourceDefinition(crd)
+	dcrd := model.GetCustomResourceDefinition(crdDifferingPlural)
+
+	otherGroup := unstructured.NewCRD()
+	otherGroup.SetSpecGroup("example.net")
+	otherGroup.SetSpecNames(kextv1.CustomResourceDefinitionNames{Kind: "Example"})
+
+	otherKind := unstructured.NewCRD()
+	otherKind.SetSpecGroup("example.org")
+	otherKind.SetSpecNames(kextv1.CustomResourceDefinitionNames{Kind: "Illustration"})
 
 	type args struct {
 		ctx context.Context
@@ -88,7 +94,24 @@ func TestProviderConfigDefinition(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errGetClient).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetClient)),
+				},
+			},
+		},
+		"GetCRDError": {
+			reason: "If we can't get the CRD we should add the error to the GraphQL context and return early.",
+			clients: ClientCacheFn(func(_ auth.Credentials, _ ...clients.GetOption) (client.Client, error) {
+				return &test.MockClient{
+					MockGet: test.NewMockGetFn(errBoom),
+				}, nil
+			}),
+			args: args{
+				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
+				obj: &model.ProviderConfig{},
+			},
+			want: want{
+				errs: gqlerror.List{
+					gqlerror.Wrap(errors.Wrap(errBoom, errGetCRD)),
 				},
 			},
 		},
@@ -96,6 +119,9 @@ func TestProviderConfigDefinition(t *testing.T) {
 			reason: "If we can't list CRDs we should add the error to the GraphQL context and return early.",
 			clients: ClientCacheFn(func(_ auth.Credentials, _ ...clients.GetOption) (client.Client, error) {
 				return &test.MockClient{
+					MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+						return errNotFound
+					}),
 					MockList: test.NewMockListFn(errBoom),
 				}, nil
 			}),
@@ -105,7 +131,7 @@ func TestProviderConfigDefinition(t *testing.T) {
 			},
 			want: want{
 				errs: gqlerror.List{
-					gqlerror.Errorf(errors.Wrap(errBoom, errListCRDs).Error()),
+					gqlerror.Wrap(errors.Wrap(errBoom, errListCRDs)),
 				},
 			},
 		},
@@ -113,10 +139,8 @@ func TestProviderConfigDefinition(t *testing.T) {
 			reason: "If we can get and model the CRD that defines this provider config we should return it.",
 			clients: ClientCacheFn(func(_ auth.Credentials, _ ...clients.GetOption) (client.Client, error) {
 				return &test.MockClient{
-					MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
-						*obj.(*kextv1.CustomResourceDefinitionList) = kextv1.CustomResourceDefinitionList{
-							Items: []kextv1.CustomResourceDefinition{otherGroup, otherKind, crd},
-						}
+					MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+						*obj.(*kunstructured.Unstructured) = *crd.GetUnstructured()
 						return nil
 					}),
 				}, nil
@@ -124,21 +148,26 @@ func TestProviderConfigDefinition(t *testing.T) {
 			args: args{
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 				obj: &model.ProviderConfig{
-					APIVersion: crd.Spec.Group + "/v1",
-					Kind:       crd.Spec.Names.Kind,
+					APIVersion: crd.GetSpecGroup() + "/v1",
+					Kind:       crd.GetSpecNames().Kind,
 				},
 			},
 			want: want{
 				mrd: &gcrd,
 			},
 		},
-		"NoCRD": {
-			reason: "If we can't get and model the CRD that defines this provider config we should return nil.",
+		"DifferentPlural": {
+			reason: `In the event we get a request for an object whose CRD has 
+			a non-predictable plural form, ensure the CRD list contains the 
+			expected resource.`,
 			clients: ClientCacheFn(func(_ auth.Credentials, _ ...clients.GetOption) (client.Client, error) {
 				return &test.MockClient{
+					MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+						return errNotFound
+					}),
 					MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
-						*obj.(*kextv1.CustomResourceDefinitionList) = kextv1.CustomResourceDefinitionList{
-							Items: []kextv1.CustomResourceDefinition{otherGroup, otherKind},
+						*obj.(*kunstructured.UnstructuredList) = kunstructured.UnstructuredList{
+							Items: []kunstructured.Unstructured{otherGroup.Unstructured, otherKind.Unstructured, crdDifferingPlural.Unstructured},
 						}
 						return nil
 					}),
@@ -147,8 +176,34 @@ func TestProviderConfigDefinition(t *testing.T) {
 			args: args{
 				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
 				obj: &model.ProviderConfig{
-					APIVersion: crd.Spec.Group + "/v1",
-					Kind:       crd.Spec.Names.Kind,
+					APIVersion: crd.GetSpecGroup() + "/v1",
+					Kind:       crd.GetSpecNames().Kind,
+				},
+			},
+			want: want{
+				mrd: &dcrd,
+			},
+		},
+		"NoCRD": {
+			reason: "If we can't get and model the CRD that defines this provider config we should return nil.",
+			clients: ClientCacheFn(func(_ auth.Credentials, _ ...clients.GetOption) (client.Client, error) {
+				return &test.MockClient{
+					MockGet: test.NewMockGetFn(nil, func(obj client.Object) error {
+						return errNotFound
+					}),
+					MockList: test.NewMockListFn(nil, func(obj client.ObjectList) error {
+						*obj.(*kunstructured.UnstructuredList) = kunstructured.UnstructuredList{
+							Items: []kunstructured.Unstructured{otherGroup.Unstructured, otherKind.Unstructured},
+						}
+						return nil
+					}),
+				}, nil
+			}),
+			args: args{
+				ctx: graphql.WithResponseContext(context.Background(), graphql.DefaultErrorPresenter, graphql.DefaultRecover),
+				obj: &model.ProviderConfig{
+					APIVersion: crd.GetSpecGroup() + "/v1",
+					Kind:       crd.GetSpecNames().Kind,
 				},
 			},
 			want: want{
@@ -172,7 +227,10 @@ func TestProviderConfigDefinition(t *testing.T) {
 			if diff := cmp.Diff(tc.want.errs, errs, test.EquateErrors()); diff != "" {
 				t.Errorf("\n%s\ns.Definition(...): -want GraphQL errors, +got GraphQL errors:\n%s\n", tc.reason, diff)
 			}
-			if diff := cmp.Diff(tc.want.mrd, got, cmpopts.IgnoreUnexported(model.ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want.mrd, got,
+				cmpopts.IgnoreUnexported(model.ObjectMeta{}),
+				cmpopts.IgnoreFields(model.CustomResourceDefinition{}, "PavedAccess"),
+			); diff != "" {
 				t.Errorf("\n%s\ns.Definition(...): -want, +got:\n%s\n", tc.reason, diff)
 			}
 		})

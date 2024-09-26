@@ -15,12 +15,12 @@
 package model
 
 import (
+	"encoding/json"
+
 	kextv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/util/json"
 
 	"github.com/google/go-cmp/cmp"
 
-	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	extv1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 )
 
@@ -28,13 +28,13 @@ import (
 // CompositeResourceDefinition.
 type CompositeResourceDefinitionSpec struct {
 	Group                string                               `json:"group"`
-	Names                *CompositeResourceDefinitionNames    `json:"names"`
+	Names                CompositeResourceDefinitionNames     `json:"names"`
 	ClaimNames           *CompositeResourceDefinitionNames    `json:"claimNames"`
 	ConnectionSecretKeys []string                             `json:"connectionSecretKeys"`
 	Versions             []CompositeResourceDefinitionVersion `json:"versions"`
 
-	DefaultCompositionReference  *xpv1.Reference
-	EnforcedCompositionReference *xpv1.Reference
+	DefaultCompositionReference  *extv1.CompositionReference
+	EnforcedCompositionReference *extv1.CompositionReference
 }
 
 // GetCompositeResourceDefinitionNames from the supplied Kubernetes names.
@@ -129,25 +129,19 @@ func GetCompositeResourceDefinition(xrd *extv1.CompositeResourceDefinition) Comp
 		APIVersion: xrd.APIVersion,
 		Kind:       xrd.Kind,
 		Metadata:   GetObjectMeta(xrd),
-		Spec: &CompositeResourceDefinitionSpec{
+		Spec: CompositeResourceDefinitionSpec{
 			Group:                        xrd.Spec.Group,
-			Names:                        GetCompositeResourceDefinitionNames(&xrd.Spec.Names),
+			Names:                        *GetCompositeResourceDefinitionNames(&xrd.Spec.Names),
 			ClaimNames:                   GetCompositeResourceDefinitionNames(xrd.Spec.ClaimNames),
 			Versions:                     GetCompositeResourceDefinitionVersions(xrd.Spec.Versions),
 			DefaultCompositionReference:  xrd.Spec.DefaultCompositionRef,
 			EnforcedCompositionReference: xrd.Spec.EnforcedCompositionRef,
 		},
-		Status:       GetCompositeResourceDefinitionStatus(xrd.Status),
-		Unstructured: unstruct(xrd),
+		Status: GetCompositeResourceDefinitionStatus(xrd.Status),
+		PavedAccess: PavedAccess{
+			Paved: paveObject(xrd),
+		},
 	}
-}
-
-// GetCompositionStatus from the supplied Crossplane status.
-func GetCompositionStatus(in extv1.CompositionStatus) *CompositionStatus {
-	if len(in.Conditions) == 0 {
-		return nil
-	}
-	return &CompositionStatus{Conditions: GetConditions(in.Conditions)}
 }
 
 // GetComposition from the supplied Crossplane Composition.
@@ -161,14 +155,51 @@ func GetComposition(cmp *extv1.Composition) Composition {
 		APIVersion: cmp.APIVersion,
 		Kind:       cmp.Kind,
 		Metadata:   GetObjectMeta(cmp),
-		Spec: &CompositionSpec{
-			CompositeTypeRef: &TypeReference{
+		Spec: CompositionSpec{
+			CompositeTypeRef: TypeReference{
 				APIVersion: cmp.Spec.CompositeTypeRef.APIVersion,
 				Kind:       cmp.Spec.CompositeTypeRef.Kind,
 			},
 			WriteConnectionSecretsToNamespace: cmp.Spec.WriteConnectionSecretsToNamespace,
 		},
-		Status:       GetCompositionStatus(cmp.Status),
-		Unstructured: unstruct(cmp),
+		PavedAccess: PavedAccess{
+			Paved: paveObject(cmp),
+		},
 	}
+}
+
+/* Handle deprecated items preferring non-deprecated */
+func (options *DefinedCompositeResourceOptionsInput) DeprecationPatch(version *string) {
+	if version != nil && options.Version == nil {
+		options.Version = version
+	}
+}
+
+/* Handle deprecated items preferring non-deprecated */
+func (options *DefinedCompositeResourceClaimOptionsInput) DeprecationPatch(version *string, namespace *string) {
+	if version != nil && options.Version == nil {
+		options.Version = version
+	}
+	if namespace != nil && options.Namespace == nil {
+		options.Namespace = namespace
+	}
+}
+
+/* A model that has conditions */
+type ConditionedModel interface {
+	GetConditions() []Condition
+}
+
+func (m *CompositeResourceClaim) GetConditions() []Condition {
+	if m.Status != nil {
+		return m.Status.Conditions
+	}
+	return nil
+}
+
+func (m *CompositeResource) GetConditions() []Condition {
+	if m.Status != nil {
+		return m.Status.Conditions
+	}
+	return nil
 }

@@ -16,12 +16,14 @@ package resolvers
 
 import (
 	"context"
+	"sync"
 
 	"github.com/99designs/gqlgen/graphql"
-	"github.com/pkg/errors"
 	kunstructured "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
+
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
 
 	"github.com/upbound/xgql/internal/auth"
 	"github.com/upbound/xgql/internal/graph/model"
@@ -36,7 +38,7 @@ type objectMeta struct {
 	clients ClientCache
 }
 
-func (r *objectMeta) Owners(ctx context.Context, obj *model.ObjectMeta) (*model.OwnerConnection, error) {
+func (r *objectMeta) Owners(ctx context.Context, obj *model.ObjectMeta) (model.OwnerConnection, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -44,31 +46,44 @@ func (r *objectMeta) Owners(ctx context.Context, obj *model.ObjectMeta) (*model.
 	c, err := r.clients.Get(creds)
 	if err != nil {
 		graphql.AddError(ctx, errors.Wrap(err, errGetClient))
-		return nil, nil
+		return model.OwnerConnection{}, nil
 	}
 
 	owners := make([]model.Owner, 0, len(obj.OwnerReferences))
+	// Collect all concurrently.
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
 	for _, ref := range obj.OwnerReferences {
-		u := &kunstructured.Unstructured{}
-		u.SetAPIVersion(ref.APIVersion)
-		u.SetKind(ref.Kind)
+		ref := ref // So we don't reference the loop variable.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			u := &kunstructured.Unstructured{}
+			u.SetAPIVersion(ref.APIVersion)
+			u.SetKind(ref.Kind)
 
-		nn := types.NamespacedName{Namespace: pointer.StringPtrDerefOr(obj.Namespace, ""), Name: ref.Name}
-		if err := c.Get(ctx, nn, u); err != nil {
-			graphql.AddError(ctx, errors.Wrap(err, errGetOwner))
-			continue
-		}
+			nn := types.NamespacedName{Namespace: ptr.Deref(obj.Namespace, ""), Name: ref.Name}
+			if err := c.Get(ctx, nn, u); err != nil {
+				graphql.AddError(ctx, errors.Wrap(err, errGetOwner))
+				return
+			}
 
-		kr, err := model.GetKubernetesResource(u)
-		if err != nil {
-			graphql.AddError(ctx, errors.Wrap(err, errModelOwner))
-			continue
-		}
+			kr, err := model.GetKubernetesResource(u)
+			if err != nil {
+				graphql.AddError(ctx, errors.Wrap(err, errModelOwner))
+				return
+			}
 
-		owners = append(owners, model.Owner{Controller: ref.Controller, Resource: kr})
+			mu.Lock()
+			defer mu.Unlock()
+			owners = append(owners, model.Owner{Controller: ref.Controller, Resource: kr})
+		}()
 	}
+	wg.Wait()
 
-	return &model.OwnerConnection{Nodes: owners, TotalCount: len(owners)}, nil
+	return model.OwnerConnection{Nodes: owners, TotalCount: len(owners)}, nil
 }
 
 func (r *objectMeta) Controller(ctx context.Context, obj *model.ObjectMeta) (model.KubernetesResource, error) {
@@ -83,7 +98,7 @@ func (r *objectMeta) Controller(ctx context.Context, obj *model.ObjectMeta) (mod
 	}
 
 	for _, ref := range obj.OwnerReferences {
-		if !pointer.BoolPtrDerefOr(ref.Controller, false) {
+		if !ptr.Deref(ref.Controller, false) {
 			continue
 		}
 
@@ -91,7 +106,7 @@ func (r *objectMeta) Controller(ctx context.Context, obj *model.ObjectMeta) (mod
 		u.SetAPIVersion(ref.APIVersion)
 		u.SetKind(ref.Kind)
 
-		nn := types.NamespacedName{Namespace: pointer.StringPtrDerefOr(obj.Namespace, ""), Name: ref.Name}
+		nn := types.NamespacedName{Namespace: ptr.Deref(obj.Namespace, ""), Name: ref.Name}
 		if err := c.Get(ctx, nn, u); err != nil {
 			graphql.AddError(ctx, errors.Wrap(err, errGetOwner))
 			return nil, nil

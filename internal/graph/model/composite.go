@@ -20,6 +20,8 @@ import (
 	kunstructured "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
+	"github.com/crossplane/crossplane-runtime/pkg/fieldpath"
+	"github.com/crossplane/crossplane-runtime/pkg/resource/unstructured/claim"
 
 	"github.com/upbound/xgql/internal/unstructured"
 )
@@ -28,10 +30,10 @@ import (
 type CompositeResourceSpec struct {
 	CompositionSelector *LabelSelector `json:"compositionSelector"`
 
-	CompositionReference              *corev1.ObjectReference
-	ClaimReference                    *corev1.ObjectReference
-	ResourceReferences                []corev1.ObjectReference
-	WritesConnectionSecretToReference *xpv1.SecretReference
+	CompositionReference             *corev1.ObjectReference
+	ClaimReference                   *claim.Reference
+	ResourceReferences               []corev1.ObjectReference
+	WriteConnectionSecretToReference *xpv1.SecretReference
 }
 
 // GetCompositeResourceStatus from the supplied Crossplane composite.
@@ -67,15 +69,17 @@ func GetCompositeResource(u *kunstructured.Unstructured) CompositeResource {
 		APIVersion: xr.GetAPIVersion(),
 		Kind:       xr.GetKind(),
 		Metadata:   GetObjectMeta(xr),
-		Spec: &CompositeResourceSpec{
-			CompositionSelector:               GetLabelSelector(xr.GetCompositionSelector()),
-			CompositionReference:              xr.GetCompositionReference(),
-			ClaimReference:                    xr.GetClaimReference(),
-			ResourceReferences:                xr.GetResourceReferences(),
-			WritesConnectionSecretToReference: xr.GetWriteConnectionSecretToReference(),
+		Spec: CompositeResourceSpec{
+			CompositionSelector:              GetLabelSelector(xr.GetCompositionSelector()),
+			CompositionReference:             xr.GetCompositionReference(),
+			ClaimReference:                   xr.GetClaimReference(),
+			ResourceReferences:               xr.GetResourceReferences(),
+			WriteConnectionSecretToReference: xr.GetWriteConnectionSecretToReference(),
 		},
-		Status:       GetCompositeResourceStatus(xr),
-		Unstructured: unstruct(xr),
+		Status: GetCompositeResourceStatus(xr),
+		PavedAccess: PavedAccess{
+			Paved: fieldpath.Pave(u.Object),
+		},
 	}
 }
 
@@ -97,7 +101,7 @@ type CompositeResourceClaimSpec struct {
 	// We use a non-local secret reference because we need to know what
 	// namespace the secret is in when we're resolving it, when we only have
 	// access to the spec.
-	WritesConnectionSecretToReference *xpv1.SecretReference
+	WriteConnectionSecretToReference *xpv1.SecretReference
 }
 
 // GetCompositeResourceClaimStatus from the supplied Crossplane claim.
@@ -134,13 +138,15 @@ func GetCompositeResourceClaim(u *kunstructured.Unstructured) CompositeResourceC
 		APIVersion: xrc.GetAPIVersion(),
 		Kind:       xrc.GetKind(),
 		Metadata:   GetObjectMeta(xrc),
-		Spec: &CompositeResourceClaimSpec{
-			CompositionSelector:               GetLabelSelector(xrc.GetCompositionSelector()),
-			CompositionReference:              xrc.GetCompositionReference(),
-			ResourceReference:                 xrc.GetResourceReference(),
-			WritesConnectionSecretToReference: delocalize(xrc.GetWriteConnectionSecretToReference(), xrc.GetNamespace()),
+		Spec: CompositeResourceClaimSpec{
+			CompositionSelector:              GetLabelSelector(xrc.GetCompositionSelector()),
+			CompositionReference:             xrc.GetCompositionReference(),
+			ResourceReference:                xrc.GetResourceReference(),
+			WriteConnectionSecretToReference: delocalize(xrc.GetWriteConnectionSecretToReference(), xrc.GetNamespace()),
 		},
-		Status:       GetCompositeResourceClaimStatus(xrc),
-		Unstructured: unstruct(xrc),
+		Status: GetCompositeResourceClaimStatus(xrc),
+		PavedAccess: PavedAccess{
+			Paved: fieldpath.Pave(u.Object),
+		},
 	}
 }

@@ -17,14 +17,16 @@ package resolvers
 import (
 	"context"
 	"sort"
+	"sync"
 
 	"github.com/99designs/gqlgen/graphql"
-	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
+	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	extv1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
 
 	"github.com/upbound/xgql/internal/auth"
@@ -45,7 +47,7 @@ type compositeResource struct {
 	clients ClientCache
 }
 
-func (r *compositeResource) Events(ctx context.Context, obj *model.CompositeResource) (*model.EventConnection, error) {
+func (r *compositeResource) Events(ctx context.Context, obj *model.CompositeResource) (model.EventConnection, error) {
 	e := &events{clients: r.clients}
 	return e.Resolve(ctx, &corev1.ObjectReference{
 		APIVersion: obj.APIVersion,
@@ -122,12 +124,23 @@ func (r *compositeResourceSpec) Composition(ctx context.Context, obj *model.Comp
 	cmp := &extv1.Composition{}
 	nn := types.NamespacedName{Name: obj.CompositionReference.Name}
 	if err := c.Get(ctx, nn, cmp); err != nil {
-		graphql.AddError(ctx, errors.Wrap(err, errGetComposition))
+		if !apierrors.IsNotFound(err) {
+			graphql.AddError(ctx, errors.Wrap(err, errGetComposition))
+		}
+
 		return nil, nil
 	}
 
 	out := model.GetComposition(cmp)
 	return &out, nil
+}
+
+func (r *compositeResourceSpec) CompositionRef(ctx context.Context, obj *model.CompositeResourceSpec) (*model.LocalObjectReference, error) {
+	if obj.CompositionReference == nil {
+		return nil, nil
+	}
+
+	return &model.LocalObjectReference{Name: obj.CompositionReference.Name}, nil
 }
 
 func (r *compositeResourceSpec) Claim(ctx context.Context, obj *model.CompositeResourceSpec) (*model.CompositeResourceClaim, error) {
@@ -152,7 +165,10 @@ func (r *compositeResourceSpec) Claim(ctx context.Context, obj *model.CompositeR
 		Name:      obj.ClaimReference.Name,
 	}
 	if err := c.Get(ctx, nn, xrc); err != nil {
-		graphql.AddError(ctx, errors.Wrap(err, errGetXRC))
+		if !apierrors.IsNotFound(err) {
+			graphql.AddError(ctx, errors.Wrap(err, errGetXRC))
+		}
+
 		return nil, nil
 	}
 
@@ -160,7 +176,20 @@ func (r *compositeResourceSpec) Claim(ctx context.Context, obj *model.CompositeR
 	return &out, nil
 }
 
-func (r *compositeResourceSpec) Resources(ctx context.Context, obj *model.CompositeResourceSpec) (*model.KubernetesResourceConnection, error) {
+func (r *compositeResourceSpec) ClaimRef(ctx context.Context, obj *model.CompositeResourceSpec) (*model.ObjectReference, error) {
+	if obj == nil || obj.ClaimReference == nil {
+		return nil, nil
+	}
+
+	return model.GetObjectReference(&corev1.ObjectReference{
+		Kind:       obj.ClaimReference.Kind,
+		Namespace:  obj.ClaimReference.Namespace,
+		Name:       obj.ClaimReference.Name,
+		APIVersion: obj.ClaimReference.APIVersion,
+	}), nil
+}
+
+func (r *compositeResourceSpec) Resources(ctx context.Context, obj *model.CompositeResourceSpec) (model.KubernetesResourceConnection, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -168,39 +197,67 @@ func (r *compositeResourceSpec) Resources(ctx context.Context, obj *model.Compos
 	c, err := r.clients.Get(creds)
 	if err != nil {
 		graphql.AddError(ctx, errors.Wrap(err, errGetClient))
-		return nil, nil
+		return model.KubernetesResourceConnection{}, nil
 	}
 
 	out := &model.KubernetesResourceConnection{
 		Nodes: make([]model.KubernetesResource, 0, len(obj.ResourceReferences)),
 	}
 
+	// Collect all concurrently.
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
 	for _, ref := range obj.ResourceReferences {
-		xrc := &unstructured.Unstructured{}
-		xrc.SetAPIVersion(ref.APIVersion)
-		xrc.SetKind(ref.Kind)
-		nn := types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}
-		if err := c.Get(ctx, nn, xrc); err != nil {
-			graphql.AddError(ctx, errors.Wrap(err, errGetComposed))
+		// Ignore nameless resource references
+		if ref.Name == "" {
 			continue
 		}
 
-		kr, err := model.GetKubernetesResource(xrc)
-		if err != nil {
-			graphql.AddError(ctx, errors.Wrap(err, errModelComposed))
-			continue
-		}
+		ref := ref // So we don't take the address of a range variable.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			xrc := &unstructured.Unstructured{}
+			xrc.SetAPIVersion(ref.APIVersion)
+			xrc.SetKind(ref.Kind)
+			nn := types.NamespacedName{Namespace: ref.Namespace, Name: ref.Name}
+			if err := c.Get(ctx, nn, xrc); err != nil {
+				if !apierrors.IsNotFound(err) {
+					graphql.AddError(ctx, errors.Wrap(err, errGetComposed))
+				}
+				return
+			}
 
-		out.Nodes = append(out.Nodes, kr)
-		out.TotalCount++
+			kr, err := model.GetKubernetesResource(xrc)
+			if err != nil {
+				graphql.AddError(ctx, errors.Wrap(err, errModelComposed))
+				return
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			out.Nodes = append(out.Nodes, kr)
+			out.TotalCount++
+		}()
 	}
+	wg.Wait()
 
 	sort.Stable(out)
-	return out, nil
+	return *out, nil
+}
+
+func (r *compositeResourceSpec) ResourceRefs(ctx context.Context, obj *model.CompositeResourceSpec) ([]model.ObjectReference, error) {
+	resourceRefs := make([]model.ObjectReference, 0, len(obj.ResourceReferences))
+	for i := range obj.ResourceReferences {
+		resourceRefs = append(resourceRefs, *model.GetObjectReference(&obj.ResourceReferences[i]))
+	}
+	return resourceRefs, nil
 }
 
 func (r *compositeResourceSpec) ConnectionSecret(ctx context.Context, obj *model.CompositeResourceSpec) (*model.Secret, error) {
-	if obj.WritesConnectionSecretToReference == nil {
+	if obj.WriteConnectionSecretToReference == nil {
 		return nil, nil
 	}
 
@@ -216,11 +273,14 @@ func (r *compositeResourceSpec) ConnectionSecret(ctx context.Context, obj *model
 
 	s := &corev1.Secret{}
 	nn := types.NamespacedName{
-		Namespace: obj.WritesConnectionSecretToReference.Namespace,
-		Name:      obj.WritesConnectionSecretToReference.Name,
+		Namespace: obj.WriteConnectionSecretToReference.Namespace,
+		Name:      obj.WriteConnectionSecretToReference.Name,
 	}
 	if err := c.Get(ctx, nn, s); err != nil {
-		graphql.AddError(ctx, errors.Wrap(err, errGetSecret))
+		if !apierrors.IsNotFound(err) {
+			graphql.AddError(ctx, errors.Wrap(err, errGetSecret))
+		}
+
 		return nil, nil
 	}
 
@@ -228,11 +288,15 @@ func (r *compositeResourceSpec) ConnectionSecret(ctx context.Context, obj *model
 	return &out, nil
 }
 
+func (r *compositeResourceSpec) WriteConnectionSecretToReference(ctx context.Context, obj *model.CompositeResourceSpec) (*model.SecretReference, error) {
+	return model.GetSecretReference(obj.WriteConnectionSecretToReference), nil
+}
+
 type compositeResourceClaim struct {
 	clients ClientCache
 }
 
-func (r *compositeResourceClaim) Events(ctx context.Context, obj *model.CompositeResourceClaim) (*model.EventConnection, error) {
+func (r *compositeResourceClaim) Events(ctx context.Context, obj *model.CompositeResourceClaim) (model.EventConnection, error) {
 	e := &events{clients: r.clients}
 	return e.Resolve(ctx, &corev1.ObjectReference{
 		APIVersion: obj.APIVersion,
@@ -296,6 +360,14 @@ type compositeResourceClaimSpec struct {
 	clients ClientCache
 }
 
+func (r *compositeResourceClaimSpec) CompositionRef(ctx context.Context, obj *model.CompositeResourceClaimSpec) (*model.LocalObjectReference, error) {
+	if obj.CompositionReference == nil {
+		return nil, nil
+	}
+
+	return &model.LocalObjectReference{Name: obj.CompositionReference.Name}, nil
+}
+
 func (r *compositeResourceClaimSpec) Composition(ctx context.Context, obj *model.CompositeResourceClaimSpec) (*model.Composition, error) {
 	if obj.CompositionReference == nil {
 		return nil, nil
@@ -313,7 +385,10 @@ func (r *compositeResourceClaimSpec) Composition(ctx context.Context, obj *model
 	cmp := &extv1.Composition{}
 	nn := types.NamespacedName{Name: obj.CompositionReference.Name}
 	if err := c.Get(ctx, nn, cmp); err != nil {
-		graphql.AddError(ctx, errors.Wrap(err, errGetComposition))
+		if !apierrors.IsNotFound(err) {
+			graphql.AddError(ctx, errors.Wrap(err, errGetComposition))
+		}
+
 		return nil, nil
 	}
 
@@ -340,7 +415,10 @@ func (r *compositeResourceClaimSpec) Resource(ctx context.Context, obj *model.Co
 	xr.SetKind(obj.ResourceReference.Kind)
 	nn := types.NamespacedName{Name: obj.ResourceReference.Name}
 	if err := c.Get(ctx, nn, xr); err != nil {
-		graphql.AddError(ctx, errors.Wrap(err, errGetXR))
+		if !apierrors.IsNotFound(err) {
+			graphql.AddError(ctx, errors.Wrap(err, errGetXR))
+		}
+
 		return nil, nil
 	}
 
@@ -348,8 +426,12 @@ func (r *compositeResourceClaimSpec) Resource(ctx context.Context, obj *model.Co
 	return &out, nil
 }
 
+func (r *compositeResourceClaimSpec) ResourceRef(ctx context.Context, obj *model.CompositeResourceClaimSpec) (*model.ObjectReference, error) {
+	return model.GetObjectReference(obj.ResourceReference), nil
+}
+
 func (r *compositeResourceClaimSpec) ConnectionSecret(ctx context.Context, obj *model.CompositeResourceClaimSpec) (*model.Secret, error) {
-	if obj.WritesConnectionSecretToReference == nil {
+	if obj.WriteConnectionSecretToReference == nil {
 		return nil, nil
 	}
 
@@ -365,14 +447,21 @@ func (r *compositeResourceClaimSpec) ConnectionSecret(ctx context.Context, obj *
 
 	s := &corev1.Secret{}
 	nn := types.NamespacedName{
-		Namespace: obj.WritesConnectionSecretToReference.Namespace,
-		Name:      obj.WritesConnectionSecretToReference.Name,
+		Namespace: obj.WriteConnectionSecretToReference.Namespace,
+		Name:      obj.WriteConnectionSecretToReference.Name,
 	}
 	if err := c.Get(ctx, nn, s); err != nil {
-		graphql.AddError(ctx, errors.Wrap(err, errGetSecret))
+		if !apierrors.IsNotFound(err) {
+			graphql.AddError(ctx, errors.Wrap(err, errGetSecret))
+		}
+
 		return nil, nil
 	}
 
 	out := model.GetSecret(s)
 	return &out, nil
+}
+
+func (r *compositeResourceClaimSpec) WriteConnectionSecretToReference(ctx context.Context, obj *model.CompositeResourceClaimSpec) (*model.SecretReference, error) {
+	return model.GetSecretReference(obj.WriteConnectionSecretToReference), nil
 }

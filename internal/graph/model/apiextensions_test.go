@@ -23,7 +23,7 @@ import (
 	v1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	extv1 "github.com/crossplane/crossplane/apis/apiextensions/v1"
@@ -76,8 +76,8 @@ func TestGetCompositeResourceDefinition(t *testing.T) {
 							OpenAPIV3Schema: rschema,
 						},
 					}},
-					DefaultCompositionRef:  &xpv1.Reference{Name: "default"},
-					EnforcedCompositionRef: &xpv1.Reference{Name: "enforced"},
+					DefaultCompositionRef:  &extv1.CompositionReference{Name: "default"},
+					EnforcedCompositionRef: &extv1.CompositionReference{Name: "enforced"},
 				},
 				Status: extv1.CompositeResourceDefinitionStatus{
 					ConditionedStatus: xpv1.ConditionedStatus{
@@ -103,25 +103,25 @@ func TestGetCompositeResourceDefinition(t *testing.T) {
 				},
 				APIVersion: extv1.CompositeResourceDefinitionGroupVersionKind.GroupVersion().String(),
 				Kind:       extv1.CompositeResourceDefinitionKind,
-				Metadata: &ObjectMeta{
+				Metadata: ObjectMeta{
 					Name: "cool",
 				},
-				Spec: &CompositeResourceDefinitionSpec{
+				Spec: CompositeResourceDefinitionSpec{
 					Group: "group",
-					Names: &CompositeResourceDefinitionNames{
+					Names: CompositeResourceDefinitionNames{
 						Plural:     "clusterexamples",
-						Singular:   pointer.StringPtr("clusterexample"),
+						Singular:   ptr.To("clusterexample"),
 						ShortNames: []string{"cex"},
 						Kind:       "ClusterExample",
-						ListKind:   pointer.StringPtr("ClusterExampleList"),
+						ListKind:   ptr.To("ClusterExampleList"),
 						Categories: []string{"example"},
 					},
 					ClaimNames: &CompositeResourceDefinitionNames{
 						Plural:     "examples",
-						Singular:   pointer.StringPtr("example"),
+						Singular:   ptr.To("example"),
 						ShortNames: []string{"ex"},
 						Kind:       "Example",
-						ListKind:   pointer.StringPtr("ExampleList"),
+						ListKind:   ptr.To("ExampleList"),
 						Categories: []string{"example"},
 					},
 					Versions: []CompositeResourceDefinitionVersion{{
@@ -130,8 +130,8 @@ func TestGetCompositeResourceDefinition(t *testing.T) {
 						Served:        true,
 						Schema:        &CompositeResourceValidation{OpenAPIV3Schema: schema},
 					}},
-					DefaultCompositionReference:  &xpv1.Reference{Name: "default"},
-					EnforcedCompositionReference: &xpv1.Reference{Name: "enforced"},
+					DefaultCompositionReference:  &extv1.CompositionReference{Name: "default"},
+					EnforcedCompositionReference: &extv1.CompositionReference{Name: "enforced"},
 				},
 				Status: &CompositeResourceDefinitionStatus{
 					Conditions: []Condition{{}},
@@ -152,9 +152,9 @@ func TestGetCompositeResourceDefinition(t *testing.T) {
 			reason: "Absent optional fields should be absent in our model",
 			xrd:    &extv1.CompositeResourceDefinition{},
 			want: CompositeResourceDefinition{
-				Metadata: &ObjectMeta{},
-				Spec: &CompositeResourceDefinitionSpec{
-					Names: &CompositeResourceDefinitionNames{},
+				Metadata: ObjectMeta{},
+				Spec: CompositeResourceDefinitionSpec{
+					Names: CompositeResourceDefinitionNames{},
 				},
 			},
 		},
@@ -163,7 +163,7 @@ func TestGetCompositeResourceDefinition(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := GetCompositeResourceDefinition(tc.xrd)
-			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(CompositeResourceDefinition{}, "Unstructured"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(CompositeResourceDefinition{}, "PavedAccess"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\nGetCompositeResourceDefinition(...): -want, +got\n:%s", tc.reason, diff)
 			}
 		})
@@ -196,12 +196,7 @@ func TestGetComposition(t *testing.T) {
 						APIVersion: "group/v1",
 						Kind:       "ClusterExample",
 					},
-					WriteConnectionSecretsToNamespace: pointer.StringPtr("ns"),
-				},
-				Status: extv1.CompositionStatus{
-					ConditionedStatus: xpv1.ConditionedStatus{
-						Conditions: []xpv1.Condition{{}},
-					},
+					WriteConnectionSecretsToNamespace: ptr.To("ns"),
 				},
 			},
 			want: Composition{
@@ -212,18 +207,15 @@ func TestGetComposition(t *testing.T) {
 				},
 				APIVersion: extv1.CompositionGroupVersionKind.GroupVersion().String(),
 				Kind:       extv1.CompositionKind,
-				Metadata: &ObjectMeta{
+				Metadata: ObjectMeta{
 					Name: "cool",
 				},
-				Spec: &CompositionSpec{
-					CompositeTypeRef: &TypeReference{
+				Spec: CompositionSpec{
+					CompositeTypeRef: TypeReference{
 						APIVersion: "group/v1",
 						Kind:       "ClusterExample",
 					},
-					WriteConnectionSecretsToNamespace: pointer.StringPtr("ns"),
-				},
-				Status: &CompositionStatus{
-					Conditions: []Condition{{}},
+					WriteConnectionSecretsToNamespace: ptr.To("ns"),
 				},
 			},
 		},
@@ -231,9 +223,9 @@ func TestGetComposition(t *testing.T) {
 			reason: "Absent optional fields should be absent in our model",
 			xrd:    &extv1.Composition{},
 			want: Composition{
-				Metadata: &ObjectMeta{},
-				Spec: &CompositionSpec{
-					CompositeTypeRef: &TypeReference{},
+				Metadata: ObjectMeta{},
+				Spec: CompositionSpec{
+					CompositeTypeRef: TypeReference{},
 				},
 			},
 		},
@@ -242,8 +234,155 @@ func TestGetComposition(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := GetComposition(tc.xrd)
-			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(Composition{}, "Unstructured"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(Composition{}, "PavedAccess"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\nGetComposition(...): -want, +got\n:%s", tc.reason, diff)
+			}
+		})
+	}
+}
+
+func TestDefinedCompositeResourceOptionsInputDeprecation(t *testing.T) {
+	version1 := "v1"
+	version2 := "v2"
+	type args struct {
+		options *DefinedCompositeResourceOptionsInput
+		version *string
+	}
+	cases := map[string]struct {
+		reason string
+		args   args
+		want   *DefinedCompositeResourceOptionsInput
+	}{
+		"VersionNone": {
+			reason: "All supported fields should be converted to our model",
+			args: args{
+				options: &DefinedCompositeResourceOptionsInput{Version: nil},
+				version: nil,
+			},
+			want: &DefinedCompositeResourceOptionsInput{},
+		},
+		"VersionNonDeprecated": {
+			reason: "Absent optional fields should be absent in our model",
+			args: args{
+				options: &DefinedCompositeResourceOptionsInput{Version: &version1},
+				version: nil,
+			},
+			want: &DefinedCompositeResourceOptionsInput{Version: &version1},
+		},
+		"VersionDeprecated": {
+			reason: "Absent optional fields should be absent in our model",
+			args: args{
+				options: &DefinedCompositeResourceOptionsInput{Version: nil},
+				version: &version1,
+			},
+			want: &DefinedCompositeResourceOptionsInput{Version: &version1},
+		},
+		"VersionBoth": {
+			reason: "Absent optional fields should be absent in our model",
+			args: args{
+				options: &DefinedCompositeResourceOptionsInput{Version: &version1},
+				version: &version2,
+			},
+			want: &DefinedCompositeResourceOptionsInput{Version: &version1},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tc.args.options.DeprecationPatch(tc.args.version)
+			if diff := cmp.Diff(tc.want, tc.args.options); diff != "" {
+				t.Errorf("\n%s\nDeprecationPatch(...): -want, +got\n:%s", tc.reason, diff)
+			}
+		})
+	}
+}
+
+func TestDefinedCompositeResourceClaimOptionsInputDeprecation(t *testing.T) {
+	version1 := "v1"
+	version2 := "v2"
+	namespace1 := "namespace1"
+	namespace2 := "namespace2"
+	type args struct {
+		options   *DefinedCompositeResourceClaimOptionsInput
+		version   *string
+		namespace *string
+	}
+	cases := map[string]struct {
+		reason string
+		args   args
+		want   *DefinedCompositeResourceClaimOptionsInput
+	}{
+		"VersionNone": {
+			reason: "All supported fields should be converted to our model",
+			args: args{
+				options: &DefinedCompositeResourceClaimOptionsInput{Version: nil},
+				version: nil,
+			},
+			want: &DefinedCompositeResourceClaimOptionsInput{},
+		},
+		"VersionNonDeprecated": {
+			reason: "Absent optional fields should be absent in our model",
+			args: args{
+				options: &DefinedCompositeResourceClaimOptionsInput{Version: &version1},
+				version: nil,
+			},
+			want: &DefinedCompositeResourceClaimOptionsInput{Version: &version1},
+		},
+		"VersionDeprecated": {
+			reason: "Absent optional fields should be absent in our model",
+			args: args{
+				options: &DefinedCompositeResourceClaimOptionsInput{Version: nil},
+				version: &version1,
+			},
+			want: &DefinedCompositeResourceClaimOptionsInput{Version: &version1},
+		},
+		"VersionBoth": {
+			reason: "Absent optional fields should be absent in our model",
+			args: args{
+				options: &DefinedCompositeResourceClaimOptionsInput{Version: &version1},
+				version: &version2,
+			},
+			want: &DefinedCompositeResourceClaimOptionsInput{Version: &version1},
+		},
+		"NamespaceNone": {
+			reason: "All supported fields should be converted to our model",
+			args: args{
+				options:   &DefinedCompositeResourceClaimOptionsInput{Namespace: nil},
+				namespace: nil,
+			},
+			want: &DefinedCompositeResourceClaimOptionsInput{},
+		},
+		"NamespaceNonDeprecated": {
+			reason: "Absent optional fields should be absent in our model",
+			args: args{
+				options:   &DefinedCompositeResourceClaimOptionsInput{Namespace: &namespace1},
+				namespace: nil,
+			},
+			want: &DefinedCompositeResourceClaimOptionsInput{Namespace: &namespace1},
+		},
+		"NamespaceDeprecated": {
+			reason: "Absent optional fields should be absent in our model",
+			args: args{
+				options:   &DefinedCompositeResourceClaimOptionsInput{Namespace: nil},
+				namespace: &namespace1,
+			},
+			want: &DefinedCompositeResourceClaimOptionsInput{Namespace: &namespace1},
+		},
+		"NamespaceBoth": {
+			reason: "Absent optional fields should be absent in our model",
+			args: args{
+				options:   &DefinedCompositeResourceClaimOptionsInput{Namespace: &namespace1},
+				namespace: &namespace2,
+			},
+			want: &DefinedCompositeResourceClaimOptionsInput{Namespace: &namespace1},
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			tc.args.options.DeprecationPatch(tc.args.version, tc.args.namespace)
+			if diff := cmp.Diff(tc.want, tc.args.options); diff != "" {
+				t.Errorf("\n%s\nDeprecationPatch(...): -want, +got\n:%s", tc.reason, diff)
 			}
 		})
 	}

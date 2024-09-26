@@ -53,7 +53,7 @@ func TestGetProviderConfig(t *testing.T) {
 				},
 				APIVersion: "example.org/v1",
 				Kind:       "ProviderConfig",
-				Metadata: &ObjectMeta{
+				Metadata: ObjectMeta{
 					Name: "cool",
 				},
 				Status: &ProviderConfigStatus{
@@ -66,7 +66,7 @@ func TestGetProviderConfig(t *testing.T) {
 			reason: "Absent optional fields should be absent in our model",
 			u:      &kunstructured.Unstructured{Object: make(map[string]interface{})},
 			want: ProviderConfig{
-				Metadata: &ObjectMeta{},
+				Metadata: ObjectMeta{},
 			},
 		},
 	}
@@ -75,7 +75,7 @@ func TestGetProviderConfig(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			got := GetProviderConfig(tc.u)
 
-			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(ProviderConfig{}, "Unstructured"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(ProviderConfig{}, "PavedAccess"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\nGetProviderConfig(...): -want, +got\n:%s", tc.reason, diff)
 			}
 		})

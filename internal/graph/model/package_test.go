@@ -22,7 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/pointer"
+	"k8s.io/utils/ptr"
 
 	xpv1 "github.com/crossplane/crossplane-runtime/apis/common/v1"
 	pkgv1 "github.com/crossplane/crossplane/apis/pkg/v1"
@@ -58,8 +58,8 @@ func TestGetProvider(t *testing.T) {
 						RevisionActivationPolicy:    &rap,
 						RevisionHistoryLimit:        &lim,
 						PackagePullPolicy:           &ppp,
-						IgnoreCrossplaneConstraints: pointer.BoolPtr(true),
-						SkipDependencyResolution:    pointer.BoolPtr(true),
+						IgnoreCrossplaneConstraints: ptr.To(true),
+						SkipDependencyResolution:    ptr.To(true),
 					},
 				},
 				Status: pkgv1.ProviderStatus{
@@ -80,21 +80,21 @@ func TestGetProvider(t *testing.T) {
 				},
 				APIVersion: pkgv1.ProviderGroupVersionKind.GroupVersion().String(),
 				Kind:       pkgv1.ProviderKind,
-				Metadata: &ObjectMeta{
+				Metadata: ObjectMeta{
 					Name: "cool",
 				},
-				Spec: &ProviderSpec{
+				Spec: ProviderSpec{
 					Package:                     "coolthing:v1",
 					RevisionActivationPolicy:    &mrap,
 					RevisionHistoryLimit:        &mlim,
 					PackagePullPolicy:           &mppp,
-					IgnoreCrossplaneConstraints: pointer.BoolPtr(true),
-					SkipDependencyResolution:    pointer.BoolPtr(true),
+					IgnoreCrossplaneConstraints: ptr.To(true),
+					SkipDependencyResolution:    ptr.To(true),
 				},
 				Status: &ProviderStatus{
 					Conditions:        []Condition{{}},
-					CurrentRevision:   pointer.StringPtr("8"),
-					CurrentIdentifier: pointer.StringPtr("coolthing:v1"),
+					CurrentRevision:   ptr.To("8"),
+					CurrentIdentifier: ptr.To("coolthing:v1"),
 				},
 			},
 		},
@@ -102,8 +102,8 @@ func TestGetProvider(t *testing.T) {
 			reason: "Absent optional fields should be absent in our model",
 			cfg:    &pkgv1.Provider{},
 			want: Provider{
-				Metadata: &ObjectMeta{},
-				Spec:     &ProviderSpec{},
+				Metadata: ObjectMeta{},
+				Spec:     ProviderSpec{},
 			},
 		},
 	}
@@ -111,7 +111,7 @@ func TestGetProvider(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := GetProvider(tc.cfg)
-			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(Provider{}, "Unstructured"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(Provider{}, "PavedAccess"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\nGetProvider(...): -want, +got\n:%s", tc.reason, diff)
 			}
 		})
@@ -140,13 +140,15 @@ func TestGetProviderRevision(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "cool",
 				},
-				Spec: pkgv1.PackageRevisionSpec{
-					DesiredState:                pkgv1.PackageRevisionActive,
-					Package:                     "coolthing:v1",
-					PackagePullPolicy:           &ppp,
-					Revision:                    42,
-					IgnoreCrossplaneConstraints: pointer.BoolPtr(true),
-					SkipDependencyResolution:    pointer.BoolPtr(true),
+				Spec: pkgv1.ProviderRevisionSpec{
+					PackageRevisionSpec: pkgv1.PackageRevisionSpec{
+						DesiredState:                pkgv1.PackageRevisionActive,
+						Package:                     "coolthing:v1",
+						PackagePullPolicy:           &ppp,
+						Revision:                    42,
+						IgnoreCrossplaneConstraints: ptr.To(true),
+						SkipDependencyResolution:    ptr.To(true),
+					},
 				},
 				Status: pkgv1.PackageRevisionStatus{
 					ConditionedStatus: xpv1.ConditionedStatus{
@@ -173,16 +175,16 @@ func TestGetProviderRevision(t *testing.T) {
 				},
 				APIVersion: pkgv1.ProviderRevisionGroupVersionKind.GroupVersion().String(),
 				Kind:       pkgv1.ProviderRevisionKind,
-				Metadata: &ObjectMeta{
+				Metadata: ObjectMeta{
 					Name: "cool",
 				},
-				Spec: &ProviderRevisionSpec{
+				Spec: ProviderRevisionSpec{
 					DesiredState:                PackageRevisionDesiredStateActive,
 					Package:                     "coolthing:v1",
 					PackagePullPolicy:           &mppp,
 					Revision:                    42,
-					IgnoreCrossplaneConstraints: pointer.BoolPtr(true),
-					SkipDependencyResolution:    pointer.BoolPtr(true),
+					IgnoreCrossplaneConstraints: ptr.To(true),
+					SkipDependencyResolution:    ptr.To(true),
 				},
 				Status: &ProviderRevisionStatus{
 					Conditions:            []Condition{{}},
@@ -204,8 +206,8 @@ func TestGetProviderRevision(t *testing.T) {
 			reason: "Absent optional fields should be absent in our model",
 			cfg:    &pkgv1.ProviderRevision{},
 			want: ProviderRevision{
-				Metadata: &ObjectMeta{},
-				Spec:     &ProviderRevisionSpec{},
+				Metadata: ObjectMeta{},
+				Spec:     ProviderRevisionSpec{},
 			},
 		},
 	}
@@ -213,7 +215,7 @@ func TestGetProviderRevision(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := GetProviderRevision(tc.cfg)
-			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(ProviderRevision{}, "Unstructured"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(ProviderRevision{}, "PavedAccess"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\nGetProviderRevision(...): -want, +got\n:%s", tc.reason, diff)
 			}
 		})
@@ -250,8 +252,8 @@ func TestGetConfiguration(t *testing.T) {
 						RevisionActivationPolicy:    &rap,
 						RevisionHistoryLimit:        &lim,
 						PackagePullPolicy:           &ppp,
-						IgnoreCrossplaneConstraints: pointer.BoolPtr(true),
-						SkipDependencyResolution:    pointer.BoolPtr(true),
+						IgnoreCrossplaneConstraints: ptr.To(true),
+						SkipDependencyResolution:    ptr.To(true),
 					},
 				},
 				Status: pkgv1.ConfigurationStatus{
@@ -272,21 +274,21 @@ func TestGetConfiguration(t *testing.T) {
 				},
 				APIVersion: pkgv1.ConfigurationGroupVersionKind.GroupVersion().String(),
 				Kind:       pkgv1.ConfigurationKind,
-				Metadata: &ObjectMeta{
+				Metadata: ObjectMeta{
 					Name: "cool",
 				},
-				Spec: &ConfigurationSpec{
+				Spec: ConfigurationSpec{
 					Package:                     "coolthing:v1",
 					RevisionActivationPolicy:    &mrap,
 					RevisionHistoryLimit:        &mlim,
 					PackagePullPolicy:           &mppp,
-					IgnoreCrossplaneConstraints: pointer.BoolPtr(true),
-					SkipDependencyResolution:    pointer.BoolPtr(true),
+					IgnoreCrossplaneConstraints: ptr.To(true),
+					SkipDependencyResolution:    ptr.To(true),
 				},
 				Status: &ConfigurationStatus{
 					Conditions:        []Condition{{}},
-					CurrentRevision:   pointer.StringPtr("8"),
-					CurrentIdentifier: pointer.StringPtr("coolthing:v1"),
+					CurrentRevision:   ptr.To("8"),
+					CurrentIdentifier: ptr.To("coolthing:v1"),
 				},
 			},
 		},
@@ -294,8 +296,8 @@ func TestGetConfiguration(t *testing.T) {
 			reason: "Absent optional fields should be absent in our model",
 			cfg:    &pkgv1.Configuration{},
 			want: Configuration{
-				Metadata: &ObjectMeta{},
-				Spec:     &ConfigurationSpec{},
+				Metadata: ObjectMeta{},
+				Spec:     ConfigurationSpec{},
 			},
 		},
 	}
@@ -303,7 +305,7 @@ func TestGetConfiguration(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := GetConfiguration(tc.cfg)
-			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(Configuration{}, "Unstructured"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(Configuration{}, "PavedAccess"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\nGetConfiguration(...): -want, +got\n:%s", tc.reason, diff)
 			}
 		})
@@ -337,8 +339,8 @@ func TestGetConfigurationRevision(t *testing.T) {
 					Package:                     "coolthing:v1",
 					PackagePullPolicy:           &ppp,
 					Revision:                    42,
-					IgnoreCrossplaneConstraints: pointer.BoolPtr(true),
-					SkipDependencyResolution:    pointer.BoolPtr(true),
+					IgnoreCrossplaneConstraints: ptr.To(true),
+					SkipDependencyResolution:    ptr.To(true),
 				},
 				Status: pkgv1.PackageRevisionStatus{
 					ConditionedStatus: xpv1.ConditionedStatus{
@@ -365,16 +367,16 @@ func TestGetConfigurationRevision(t *testing.T) {
 				},
 				APIVersion: pkgv1.ConfigurationRevisionGroupVersionKind.GroupVersion().String(),
 				Kind:       pkgv1.ConfigurationRevisionKind,
-				Metadata: &ObjectMeta{
+				Metadata: ObjectMeta{
 					Name: "cool",
 				},
-				Spec: &ConfigurationRevisionSpec{
+				Spec: ConfigurationRevisionSpec{
 					DesiredState:                PackageRevisionDesiredStateActive,
 					Package:                     "coolthing:v1",
 					PackagePullPolicy:           &mppp,
 					Revision:                    42,
-					IgnoreCrossplaneConstraints: pointer.BoolPtr(true),
-					SkipDependencyResolution:    pointer.BoolPtr(true),
+					IgnoreCrossplaneConstraints: ptr.To(true),
+					SkipDependencyResolution:    ptr.To(true),
 				},
 				Status: &ConfigurationRevisionStatus{
 					Conditions:            []Condition{{}},
@@ -396,8 +398,8 @@ func TestGetConfigurationRevision(t *testing.T) {
 			reason: "Absent optional fields should be absent in our model",
 			cfg:    &pkgv1.ConfigurationRevision{},
 			want: ConfigurationRevision{
-				Metadata: &ObjectMeta{},
-				Spec:     &ConfigurationRevisionSpec{},
+				Metadata: ObjectMeta{},
+				Spec:     ConfigurationRevisionSpec{},
 			},
 		},
 	}
@@ -405,7 +407,7 @@ func TestGetConfigurationRevision(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			got := GetConfigurationRevision(tc.cfg)
-			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(ConfigurationRevision{}, "Unstructured"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
+			if diff := cmp.Diff(tc.want, got, cmpopts.IgnoreFields(ConfigurationRevision{}, "PavedAccess"), cmp.AllowUnexported(ObjectMeta{})); diff != "" {
 				t.Errorf("\n%s\nGetConfigurationRevision(...): -want, +got\n:%s", tc.reason, diff)
 			}
 		})
